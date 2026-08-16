@@ -378,6 +378,32 @@
     .two-col { grid-template-columns: 1fr; }
     .countdown-number { font-size: 64px; }
   }
+
+  /* ================= TOAST (avisos de sesión / almacenamiento) ================= */
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    max-width: 480px;
+    width: calc(100% - 40px);
+    background: var(--panel-raised);
+    border: 1px solid var(--border-strong);
+    color: var(--text-primary);
+    padding: 12px 16px;
+    border-radius: var(--radius);
+    font-size: 12px;
+    line-height: 1.5;
+    z-index: 50;
+    display: none;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  }
+  .toast.show { display: block; }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+  .toast.ok { border-color: var(--series-omission); }
+
+  /* ================= BLOQUES / HISTORY DURATION FILTER ================= */
+  .duration-group.compact { max-width: 360px; }
 </style>
 </head>
 <body>
@@ -492,6 +518,19 @@
     </div>
 
     <div class="panel row-gap">
+      <div class="panel-title">Deriva por bloques de 1 min</div>
+      <div class="table-wrap">
+        <table class="history" id="blocks-table">
+          <thead>
+            <tr><th>Bloque</th><th>RT mediana</th><th>Objetivos</th><th>Omisiones</th><th>Comisiones</th></tr>
+          </thead>
+          <tbody id="blocks-tbody"></tbody>
+        </table>
+      </div>
+      <div class="empty-state" id="blocks-empty" style="display:none;"></div>
+    </div>
+
+    <div class="panel row-gap">
       <div class="panel-title">Comparación con el histórico (misma duración)</div>
       <div id="results-compare"></div>
     </div>
@@ -517,6 +556,21 @@
     </div>
 
     <div class="panel">
+      <div class="panel-title">Duración (todos los gráficos y la tabla se filtran por esta selección)</div>
+      <div class="duration-group compact" id="history-duration-group" role="radiogroup" aria-label="Duración del histórico">
+        <div class="duration-option" data-history-duration="5" role="radio" aria-checked="false" tabindex="0">
+          <span class="num">5</span><span class="unit">min</span>
+        </div>
+        <div class="duration-option selected" data-history-duration="10" role="radio" aria-checked="true" tabindex="0">
+          <span class="num">10</span><span class="unit">min</span>
+        </div>
+        <div class="duration-option" data-history-duration="20" role="radio" aria-checked="false" tabindex="0">
+          <span class="num">20</span><span class="unit">min</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel row-gap">
       <div class="panel-title">Sesiones</div>
       <div class="table-wrap">
         <table class="history" id="history-table">
@@ -556,6 +610,9 @@
 <!-- Vídeo oculto usado solo como fuente para MediaPipe durante el test. Nunca se graba ni se transmite. -->
 <video id="hidden-video" style="display:none;" muted playsinline autoplay></video>
 
+<!-- Aviso flotante: sesiones invalidadas/descartadas y resultado de escrituras en localStorage. -->
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
 <script src="logic.js"></script>
 <script>
 (function () {
@@ -569,6 +626,7 @@
   }
 
   var STORAGE_KEY = 'qbcheck.sessions';
+  var STORAGE_KEY_CORRUPT = 'qbcheck.sessions.corrupt';
   var STIMULUS_MS = 2000;
   var STIMULUS_VISIBLE_MS = 100;
   var COUNTDOWN_S = 3;
@@ -576,23 +634,57 @@
   var TRACK_INTERVAL_MS = 1000 / TRACK_FPS;
   // Umbral de velocidad (en anchuras de cara por segundo) por encima del cual
   // se considera que la cabeza está "en movimiento" para el % de tiempo activo.
-  var MOVEMENT_SPEED_THRESHOLD = 0.08;
+  var MOVEMENT_SPEED_THRESHOLD = Logic.MOVEMENT_SPEED_THRESHOLD;
+  // Hallazgo #1: salto entre frames de rAF por encima de este umbral (pestaña
+  // suspendida / hilo bloqueado) invalida y descarta la sesión de inmediato.
+  var MAX_FRAME_GAP_MS = 500;
+  // Hallazgo #2: retraso máximo aceptable entre onset teórico y onset real de
+  // presentación. Si CUALQUIER trial lo supera, la sesión se invalida al
+  // terminar (no se guarda).
+  var MAX_ONSET_DELAY_MS = 100;
+  // Hallazgo #10: errores consecutivos de detectForVideo antes de desactivar
+  // la actividad motora y dejar de invocar el detector.
+  var MAX_DETECTION_ERRORS = 5;
+  // Hallazgo #16: tamaño de bloque para la deriva por bloques de 1 min.
+  var BLOCK_MS = 60000;
 
   // ---------------- Estado de la app ----------------
   var state = {
     durationMin: 10,
+    historyDurationMin: 10, // hallazgo #15: filtro de duración del histórico
     activeScreen: 'inicio',
     camera: {
       stream: null,
       landmarker: null,
       available: false,
-      faceDetected: false
+      faceDetected: false,
+      consecutiveErrors: 0,
+      detectionDisabled: false
     },
     test: null // se construye al empezar una sesión
   };
 
+  // ================= AVISOS (toast) =================
+  var toastTimer = null;
+  function showToast(message, kind) {
+    var el = document.getElementById('toast');
+    if (!el) return;
+    el.textContent = message;
+    el.className = 'toast show' + (kind ? ' ' + kind : '');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.remove('show'); }, 6000);
+  }
+
   // ================= NAVEGACIÓN =================
   function showScreen(name) {
+    var previous = state.activeScreen;
+
+    // Hallazgo #17: si se navega fuera de Inicio mientras la cuenta atrás
+    // está en marcha, cancelarla (nunca debería quedar corriendo de fondo).
+    if (previous === 'inicio' && name !== 'inicio' && name !== 'test' && countdownActive) {
+      cancelCountdown();
+    }
+
     var screens = document.querySelectorAll('.screen');
     for (var i = 0; i < screens.length; i++) screens[i].classList.remove('active');
     var target = document.getElementById('screen-' + name);
@@ -603,6 +695,11 @@
       ensureCameraPreview();
     } else {
       stopCameraPreviewOnly();
+      // Hallazgo #11: parar el stream de cámara al salir de Inicio, salvo
+      // en la transición inmediata a la prueba (que la necesita).
+      if (previous === 'inicio' && name !== 'test') {
+        stopCameraStream();
+      }
     }
     if (name === 'historico') renderHistory();
   }
@@ -662,6 +759,25 @@
     state.durationMin = parseInt(this.getAttribute('data-duration'), 10);
   }
 
+  // ================= SELECTOR DE DURACIÓN DEL HISTÓRICO (hallazgo #15) =================
+  var historyDurationGroup = document.getElementById('history-duration-group');
+  historyDurationGroup.querySelectorAll('.duration-option').forEach(function (opt) {
+    opt.addEventListener('click', selectHistoryDuration);
+    opt.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectHistoryDuration.call(opt); }
+    });
+  });
+  function selectHistoryDuration() {
+    historyDurationGroup.querySelectorAll('.duration-option').forEach(function (o) {
+      o.classList.remove('selected');
+      o.setAttribute('aria-checked', 'false');
+    });
+    this.classList.add('selected');
+    this.setAttribute('aria-checked', 'true');
+    state.historyDurationMin = parseInt(this.getAttribute('data-history-duration'), 10);
+    renderHistory();
+  }
+
   // ================= CÁMARA / MEDIAPIPE =================
   // Intenta obtener la cámara y cargar MediaPipe Tasks Vision desde CDN.
   // Cualquier fallo (permiso denegado, sin red, error de carga del modelo)
@@ -701,16 +817,34 @@
     return landmarkerPromise;
   }
 
+  // Hallazgo #12: token de cancelación para getUserMedia pendiente. Cada
+  // llamada a stopCameraStream() incrementa streamRequestId, así que si una
+  // petición de cámara resuelve después de que ya no haga falta (navegación
+  // fuera de Inicio/Test mientras el permiso estaba pendiente), se detectan
+  // como obsoletas y se paran sus tracks inmediatamente en vez de asignarse.
+  var streamRequestId = 0;
+  function cameraStillNeeded() {
+    return state.activeScreen === 'inicio' || state.activeScreen === 'test';
+  }
+
   var streamPromise = null;
   function ensureStream() {
     if (state.camera.stream) return Promise.resolve(state.camera.stream);
     if (streamPromise) return streamPromise;
+    var requestId = ++streamRequestId;
     streamPromise = (async function () {
       var previewVideo = document.getElementById('preview-video');
       var hiddenVideo = document.getElementById('hidden-video');
       try {
         var stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 }, audio: false });
+        if (requestId !== streamRequestId || !cameraStillNeeded()) {
+          // Ya no hace falta (se canceló o se navegó fuera): parar de inmediato.
+          stream.getTracks().forEach(function (t) { t.stop(); });
+          return null;
+        }
         state.camera.stream = stream;
+        state.camera.consecutiveErrors = 0;
+        state.camera.detectionDisabled = false;
         previewVideo.srcObject = stream;
         hiddenVideo.srcObject = stream;
         await previewVideo.play().catch(function () {});
@@ -757,17 +891,18 @@
     var previewVideo = document.getElementById('preview-video');
     var lastT = 0;
     function tick(ts) {
-      if (state.activeScreen !== 'inicio' || !state.camera.landmarker) return;
+      if (state.activeScreen !== 'inicio' || !state.camera.landmarker || state.camera.detectionDisabled) return;
       previewLoopHandle = requestAnimationFrame(tick);
       if (ts - lastT < TRACK_INTERVAL_MS) return;
       lastT = ts;
       try {
         var result = state.camera.landmarker.detectForVideo(previewVideo, performance.now());
+        noteDetectionSuccess();
         var found = result && result.faceLandmarks && result.faceLandmarks.length > 0;
         state.camera.faceDetected = found;
         setCameraStatus(found ? 'ok' : 'searching', found ? 'cara detectada' : 'buscando cara…');
       } catch (err) {
-        // ignora errores puntuales de detección durante la preview
+        noteDetectionError();
       }
     }
     previewLoopHandle = requestAnimationFrame(tick);
@@ -781,10 +916,28 @@
     if (previewLoopHandle) { cancelAnimationFrame(previewLoopHandle); previewLoopHandle = null; }
   }
   function stopCameraStream() {
+    // Hallazgo #12: invalida cualquier getUserMedia pendiente.
+    streamRequestId++;
     stopCameraPreviewOnly();
     if (state.camera.stream) {
       state.camera.stream.getTracks().forEach(function (t) { t.stop(); });
       state.camera.stream = null;
+    }
+  }
+
+  // Hallazgo #10: contador de errores consecutivos de detectForVideo. Al
+  // llegar al umbral, desactiva la actividad motora, avisa en la UI y deja
+  // de invocar el detector (los llamadores comprueban detectionDisabled).
+  function noteDetectionSuccess() {
+    state.camera.consecutiveErrors = 0;
+  }
+  function noteDetectionError() {
+    state.camera.consecutiveErrors = (state.camera.consecutiveErrors || 0) + 1;
+    if (state.camera.consecutiveErrors >= MAX_DETECTION_ERRORS && !state.camera.detectionDisabled) {
+      state.camera.detectionDisabled = true;
+      state.camera.available = false;
+      setCameraStatus('off', 'seguimiento de cara desactivado (fallos repetidos)');
+      showToast('El seguimiento facial se ha desactivado tras varios fallos consecutivos. El test sigue funcionando sin esa métrica.', 'error');
     }
   }
 
@@ -800,7 +953,27 @@
     return Math.sqrt(dx * dx + dy * dy);
   }
 
+  // Hallazgo #8: punto medio de los ojos, para centrar la nariz ANTES de
+  // dividir por la distancia interocular (si no, acercarse/alejarse de la
+  // cámara genera movimiento aparente aunque la cabeza esté centrada).
+  function eyeMidpoint(landmarks) {
+    var l = landmarks[LM_LEFT_EYE_OUTER];
+    var r = landmarks[LM_RIGHT_EYE_OUTER];
+    return { x: (l.x + r.x) / 2, y: (l.y + r.y) / 2 };
+  }
+
   // ================= SCHEDULER DEL TEST =================
+  var countdownActive = false;
+  var countdownRafHandle = null;
+
+  function cancelCountdown() {
+    if (countdownRafHandle) { cancelAnimationFrame(countdownRafHandle); countdownRafHandle = null; }
+    document.getElementById('countdown-overlay').classList.remove('active');
+    countdownActive = false;
+    var btn = document.getElementById('btn-empezar');
+    if (btn) btn.disabled = false;
+  }
+
   function startCountdownThenTest() {
     var overlay = document.getElementById('countdown-overlay');
     var numberEl = document.getElementById('countdown-number');
@@ -809,20 +982,28 @@
     numberEl.textContent = String(n);
     var startedAt = performance.now();
     function tick() {
+      if (!countdownActive) return; // cancelada (hallazgo #17)
       var elapsed = (performance.now() - startedAt) / 1000;
       var remaining = COUNTDOWN_S - Math.floor(elapsed);
       if (remaining !== n && remaining >= 0) { n = remaining; numberEl.textContent = n > 0 ? String(n) : 'ya'; }
       if (elapsed >= COUNTDOWN_S) {
         overlay.classList.remove('active');
+        countdownRafHandle = null;
+        countdownActive = false;
         beginTest();
         return;
       }
-      requestAnimationFrame(tick);
+      countdownRafHandle = requestAnimationFrame(tick);
     }
-    requestAnimationFrame(tick);
+    countdownRafHandle = requestAnimationFrame(tick);
   }
 
   document.getElementById('btn-empezar').addEventListener('click', function () {
+    // Hallazgo #17: bloquear en el primer clic para evitar runtimes
+    // concurrentes por doble inicio durante la cuenta atrás.
+    if (countdownActive) return;
+    countdownActive = true;
+    this.disabled = true;
     startCountdownThenTest();
   });
 
@@ -832,17 +1013,29 @@
     var test = {
       n: n,
       sequence: sequence,
-      trials: sequence.map(function (s) { return { isTarget: s.isTarget, classification: null, rt: null, responseOffsetMs: null }; }),
-      onsets: new Array(n),
+      trials: sequence.map(function (s) {
+        return {
+          isTarget: s.isTarget,
+          plannedOnset: null,
+          actualOnset: null,
+          classification: null,
+          firstValidOffsetMs: null,
+          rt: null,
+          anticipatoryCount: 0,
+          inputMethod: null
+        };
+      }),
       startTime: 0,
       nextIndex: 0,
       activeIndex: -1,
       rafHandle: null,
+      lastFrameTs: null,
       aborted: false,
       finished: false,
       activity: {
         samples: [], // { x, y, t } en unidades de anchura de cara (ya normalizadas)
-        lastSampleT: 0
+        lastSampleT: 0,
+        totalAttempts: 0
       }
     };
     state.test = test;
@@ -857,27 +1050,66 @@
     test.rafHandle = requestAnimationFrame(function frame(ts) { testFrame(test, ts); });
   }
 
+  // Hallazgo #1: aborta y descarta la sesión ante pestaña oculta, pérdida de
+  // foco de la ventana o un salto de frame de rAF superior a MAX_FRAME_GAP_MS.
+  // Nunca se intenta recuperar/puntuar los trials vencidos durante el salto.
+  function invalidateAndAbort(test, message) {
+    if (!test || test.finished || test.aborted) return;
+    test.aborted = true;
+    if (test.rafHandle) cancelAnimationFrame(test.rafHandle);
+    stopCameraStream();
+    state.test = null;
+    showScreen('inicio');
+    showToast(message, 'error');
+  }
+
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden && state.activeScreen === 'test' && state.test) {
+      invalidateAndAbort(state.test, 'Sesión invalidada: la pestaña perdió el foco o el navegador se suspendió.');
+    }
+  });
+  window.addEventListener('blur', function () {
+    if (state.activeScreen === 'test' && state.test) {
+      invalidateAndAbort(state.test, 'Sesión invalidada: la ventana perdió el foco.');
+    }
+  });
+
   function testFrame(test, ts) {
     if (test.aborted) return;
+
+    if (test.lastFrameTs !== null && (ts - test.lastFrameTs) > MAX_FRAME_GAP_MS) {
+      invalidateAndAbort(
+        test,
+        'Sesión invalidada: la pestaña perdió el foco o el navegador se suspendió (salto de ' +
+          Math.round(ts - test.lastFrameTs) + ' ms entre frames).'
+      );
+      return;
+    }
+    test.lastFrameTs = ts;
+
     var now = performance.now();
     var elapsed = now - test.startTime;
 
     // Avance de estímulos: dispara cada onset teórico calculado desde
     // startTime (sin acumular timeouts, comparación contra tiempo absoluto).
+    // actualOnset (hallazgo #2) es el timestamp del frame de rAF que pinta
+    // el estímulo (ts), no performance.now() ni el onset teórico.
     while (test.nextIndex < test.n && elapsed >= test.nextIndex * STIMULUS_MS) {
       var idx = test.nextIndex;
       if (test.activeIndex >= 0) closeResponseWindow(test, test.activeIndex);
-      test.onsets[idx] = test.startTime + idx * STIMULUS_MS;
+      var trial = test.trials[idx];
+      trial.plannedOnset = test.startTime + idx * STIMULUS_MS;
+      trial.actualOnset = ts;
       test.activeIndex = idx;
       showStimulus(test.sequence[idx]);
       test.nextIndex++;
     }
 
-    // Ocultar el estímulo tras STIMULUS_VISIBLE_MS (comparación de tiempo
-    // absoluto, no setTimeout acumulativo).
+    // Ocultar el estímulo 100ms después del onset REAL (actualOnset), no del
+    // teórico (hallazgo #2).
     if (test.activeIndex >= 0) {
-      var onset = test.onsets[test.activeIndex];
-      if (now - onset >= STIMULUS_VISIBLE_MS) hideStimulus();
+      var activeTrial = test.trials[test.activeIndex];
+      if (now - activeTrial.actualOnset >= STIMULUS_VISIBLE_MS) hideStimulus();
     }
 
     sampleActivity(test, now);
@@ -905,74 +1137,75 @@
     }
   }
 
+  // Cierra la ventana de un trial: si no llegó ninguna respuesta VÁLIDA
+  // (>=200ms), la clasificación final se decide ahora (omisión SIEMPRE en
+  // objetivos, haya habido o no respuestas anticipatorias — hallazgo #6).
   function closeResponseWindow(test, idx) {
     var trial = test.trials[idx];
     if (trial.classification === null) {
-      trial.classification = Logic.classifyResponse({ isTarget: trial.isTarget, responseOffsetMs: null });
+      trial.classification = Logic.classifyTrial({ isTarget: trial.isTarget, firstValidOffsetMs: trial.firstValidOffsetMs });
+      if (trial.classification === 'hit') trial.rt = trial.firstValidOffsetMs;
     }
   }
 
-  function registerResponse() {
+  // Hallazgo #3/#4: atribución de respuesta por TIEMPO (no por activeIndex),
+  // usando event.timeStamp (misma base que performance.now()) tanto para
+  // teclado como para puntero. Ventanas semiabiertas [onset, onset+2000).
+  // Hallazgo #6: una respuesta anticipatoria (<200ms desde el onset REAL del
+  // trial) no consume la ventana; solo la primera respuesta válida decide.
+  function registerResponse(eventTimeMs, method) {
     var test = state.test;
     if (!test || test.aborted || test.finished) return;
-    var idx = test.activeIndex;
-    if (idx < 0) return;
+    var idx = Logic.trialIndexForTime(eventTimeMs, test.startTime, STIMULUS_MS);
+    if (idx < 0 || idx >= test.n || idx >= test.nextIndex) return; // fuera de rango o trial aún no presentado
     var trial = test.trials[idx];
-    if (trial.classification !== null) return; // solo cuenta la primera respuesta de la ventana
-    var onset = test.onsets[idx];
-    var offset = performance.now() - onset;
-    if (offset > STIMULUS_MS) return; // fuera de ventana (no debería pasar por el flujo normal)
-    trial.responseOffsetMs = offset;
-    trial.classification = Logic.classifyResponse({ isTarget: trial.isTarget, responseOffsetMs: offset });
+    if (trial.actualOnset === null) return; // por robustez, no debería pasar dado el chequeo anterior
+    var offset = eventTimeMs - trial.actualOnset;
+    if (offset < 0) return; // respuesta antes del onset real (posible si hubo retraso de presentación)
+
+    if (Logic.isAnticipatoryOffset(offset)) {
+      trial.anticipatoryCount++;
+      return; // no consume la ventana: se sigue esperando una respuesta válida
+    }
+    if (trial.firstValidOffsetMs !== null) return; // ya hay una respuesta válida para este trial
+    trial.firstValidOffsetMs = offset;
+    trial.inputMethod = method;
+    trial.classification = Logic.classifyTrial({ isTarget: trial.isTarget, firstValidOffsetMs: offset });
     if (trial.classification === 'hit') trial.rt = offset;
   }
 
   function sampleActivity(test, now) {
-    if (!state.camera.available || !state.camera.landmarker) return;
+    if (!state.camera.available || !state.camera.landmarker || state.camera.detectionDisabled) return;
     if (now - test.activity.lastSampleT < TRACK_INTERVAL_MS) return;
     test.activity.lastSampleT = now;
     var hiddenVideo = document.getElementById('hidden-video');
+    test.activity.totalAttempts++;
     try {
       var result = state.camera.landmarker.detectForVideo(hiddenVideo, now);
+      noteDetectionSuccess();
       if (!result || !result.faceLandmarks || result.faceLandmarks.length === 0) return;
       var landmarks = result.faceLandmarks[0];
       var iod = interocularDistance(landmarks);
       if (!iod || iod <= 0) return;
+      // Hallazgo #8: centrar respecto al punto medio de los ojos ANTES de
+      // dividir por la distancia interocular (si no, acercarse/alejarse de
+      // la cámara genera movimiento aparente).
+      var mid = eyeMidpoint(landmarks);
       var nose = landmarks[LM_NOSE_TIP];
-      // Normalización por distancia interocular: coordenadas en unidades de
-      // "anchura de cara", invariantes a la distancia a la cámara.
-      test.activity.samples.push({ x: nose.x / iod, y: nose.y / iod, t: now });
+      test.activity.samples.push({ x: (nose.x - mid.x) / iod, y: (nose.y - mid.y) / iod, t: now });
     } catch (err) {
-      // ignora errores puntuales de detección
+      noteDetectionError();
     }
   }
 
-  function computeActivityMetrics(samples) {
-    if (!samples || samples.length < 2) return null;
-    var pathLength = 0;
-    var movingIntervals = 0;
-    var totalIntervals = 0;
-    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (var i = 0; i < samples.length; i++) {
-      var s = samples[i];
-      if (s.x < minX) minX = s.x;
-      if (s.x > maxX) maxX = s.x;
-      if (s.y < minY) minY = s.y;
-      if (s.y > maxY) maxY = s.y;
-      if (i > 0) {
-        var prev = samples[i - 1];
-        var dx = s.x - prev.x, dy = s.y - prev.y;
-        var dist = Math.sqrt(dx * dx + dy * dy);
-        var dt = (s.t - prev.t) / 1000;
-        pathLength += dist;
-        totalIntervals++;
-        if (dt > 0 && dist / dt > MOVEMENT_SPEED_THRESHOLD) movingIntervals++;
-      }
-    }
-    var movingPct = totalIntervals === 0 ? 0 : (movingIntervals / totalIntervals) * 100;
-    var area = (maxX - minX) * (maxY - minY);
-    var trace = Logic.subsampleTrace(samples.map(function (s) { return { x: s.x, y: s.y }; }), 2000);
-    return { pathLength: pathLength, movingPct: movingPct, area: area, trace: trace };
+  // Hallazgo #9: la lógica de corte de traza / cobertura vive en logic.js
+  // (pura, testeable). Aquí solo se empaquetan los parámetros del runtime.
+  function computeActivityMetricsForTest(test) {
+    return Logic.computeActivityMetrics(test.activity.samples, {
+      periodMs: TRACK_INTERVAL_MS,
+      speedThreshold: MOVEMENT_SPEED_THRESHOLD,
+      totalAttempts: test.activity.totalAttempts
+    });
   }
 
   function finishTest(test) {
@@ -981,9 +1214,38 @@
     stopCameraStream();
 
     var metrics = Logic.computeSessionMetrics(test.trials);
-    var activity = computeActivityMetrics(test.activity.samples);
+    var timing = Logic.computeOnsetDelayStats(test.trials);
+    var activity = computeActivityMetricsForTest(test);
+
+    // Hallazgo #2: si CUALQUIER trial se presentó con retraso > 100ms
+    // respecto a su onset teórico, la sesión se invalida al terminar: no se
+    // guarda, se informa.
+    if (timing.maxMs !== null && timing.maxMs > MAX_ONSET_DELAY_MS) {
+      state.test = null;
+      showScreen('inicio');
+      showToast(
+        'Sesión invalidada: al menos un estímulo se presentó con ' + Math.round(timing.maxMs) +
+          ' ms de retraso (límite ' + MAX_ONSET_DELAY_MS + ' ms). No se ha guardado.',
+        'error'
+      );
+      return;
+    }
+
+    // Auditabilidad: array por-trial con onset teórico/real, tipo,
+    // clasificación, RT y método de entrada.
+    var trialRecords = test.trials.map(function (t) {
+      return {
+        plannedOnset: t.plannedOnset,
+        actualOnset: t.actualOnset,
+        type: t.isTarget ? 'objetivo' : 'no-objetivo',
+        classification: t.classification,
+        rt: t.rt,
+        inputMethod: t.inputMethod
+      };
+    });
 
     var session = {
+      schemaVersion: Logic.SESSION_SCHEMA_VERSION,
       id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('s_' + Date.now() + '_' + Math.floor(Math.random() * 1e6)),
       dateISO: new Date().toISOString(),
       durationMin: state.durationMin,
@@ -996,13 +1258,23 @@
       rtSd: metrics.rtSd,
       rtCv: metrics.rtCv,
       rtSeries: metrics.rtSeries,
-      activity: activity
+      activity: activity,
+      onsetDelayMedianMs: timing.medianMs,
+      onsetDelayMaxMs: timing.maxMs,
+      trials: trialRecords
     };
 
     var historyBefore = loadSessions().filter(function (s) { return s.durationMin === session.durationMin; });
-    saveSession(session);
+    var saveResult = saveSession(session);
     renderResults(session, historyBefore);
     showScreen('resultados');
+    if (!saveResult.ok) {
+      showToast(
+        'La sesión se calculó pero no se pudo guardar en el histórico (' +
+          (saveResult.error && saveResult.error.name ? saveResult.error.name : 'error desconocido') + ').',
+        'error'
+      );
+    }
   }
 
   function abortTest() {
@@ -1017,43 +1289,102 @@
 
   // ================= ENTRADA: TECLADO Y CLIC =================
   document.addEventListener('keydown', function (e) {
+    // Hallazgo #17: Esc cancela la cuenta atrás si aún no ha empezado el test.
+    if (countdownActive && e.code === 'Escape' && !e.repeat) { cancelCountdown(); return; }
     if (state.activeScreen !== 'test') return;
+    // Hallazgo #5: ignora el auto-repeat del teclado (mantener pulsado no
+    // debe generar respuestas nuevas en cada trial).
+    if (e.repeat) return;
     if (e.code === 'Escape') { abortTest(); return; }
-    if (e.code === 'Space') { e.preventDefault(); registerResponse(); }
+    if (e.code === 'Space') { e.preventDefault(); registerResponse(e.timeStamp, 'keyboard'); }
   });
-  document.getElementById('test-stage').addEventListener('pointerdown', function () {
-    if (state.activeScreen === 'test') registerResponse();
+  document.getElementById('test-stage').addEventListener('pointerdown', function (e) {
+    if (state.activeScreen !== 'test') return;
+    // Hallazgo #19: solo el puntero primario y el botón principal cuentan.
+    if (!e.isPrimary || e.button !== 0) return;
+    registerResponse(e.timeStamp, 'pointer');
   });
 
-  // ================= PERSISTENCIA =================
-  function loadSessions() {
+  // ================= PERSISTENCIA (hallazgos #13/#14) =================
+  // Añade una entrada a la clave de respaldo qbcheck.sessions.corrupt SIN
+  // descartar el dato original, y sin arriesgar perder respaldos previos.
+  function appendCorruptBackup(entries) {
     try {
-      var raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return [];
-      var parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
+      var existing = [];
+      try {
+        var existingRaw = localStorage.getItem(STORAGE_KEY_CORRUPT);
+        if (existingRaw) {
+          var parsed = JSON.parse(existingRaw);
+          if (Array.isArray(parsed)) existing = parsed;
+        }
+      } catch (e) {
+        // el propio respaldo estaba corrupto: no perdemos las entradas nuevas
+      }
+      entries.forEach(function (entry) {
+        existing.push({ savedAt: new Date().toISOString(), entry: entry });
+      });
+      localStorage.setItem(STORAGE_KEY_CORRUPT, JSON.stringify(existing));
+    } catch (err) {
+      // ni siquiera el respaldo se pudo escribir (cuota); no hay más remedio
+    }
+  }
+
+  function loadSessions() {
+    var raw = null;
+    try {
+      raw = localStorage.getItem(STORAGE_KEY);
     } catch (err) {
       return [];
     }
+    if (!raw) return [];
+
+    var parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      // JSON no parseable: se conserva el original en la clave de respaldo
+      // ANTES de cualquier escritura futura, en vez de tratarlo como
+      // histórico vacío y perderlo en la siguiente escritura.
+      appendCorruptBackup([{ raw: raw }]);
+      showToast('El histórico guardado no se pudo leer (JSON corrupto). Se ha conservado una copia en qbcheck.sessions.corrupt.', 'error');
+      return [];
+    }
+
+    var partition = Logic.partitionSessions(parsed);
+    if (partition.invalid.length > 0) {
+      appendCorruptBackup(partition.invalid);
+      // Reescribe la clave principal solo con las entradas válidas para que
+      // las inválidas no se reprocesen en cada carga.
+      saveAllSessions(partition.valid);
+      showToast(
+        partition.invalid.length + ' entrada(s) de sesión con formato inválido se han aislado en qbcheck.sessions.corrupt.',
+        'error'
+      );
+    }
+    return partition.valid;
   }
+
   function saveAllSessions(sessions) {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+      return { ok: true };
     } catch (err) {
-      // localStorage lleno o no disponible: no interrumpe el flujo de la app
+      // Incluye QuotaExceededError: el llamador decide cómo informarlo en UI.
+      return { ok: false, error: err };
     }
   }
   function saveSession(session) {
     var sessions = loadSessions();
     sessions.push(session);
-    saveAllSessions(sessions);
+    return saveAllSessions(sessions);
   }
   function deleteSession(id) {
     var sessions = loadSessions().filter(function (s) { return s.id !== id; });
-    saveAllSessions(sessions);
+    return saveAllSessions(sessions);
   }
   function deleteAllSessions() {
-    saveAllSessions([]);
+    loadSessions(); // fuerza el respaldo de JSON corrupto/entradas inválidas antes de sobrescribir
+    return saveAllSessions([]);
   }
 
   // ================= FORMATEO =================
@@ -1075,15 +1406,20 @@
     var commissionPct = nonTargets === 0 ? 0 : (session.commissions / nonTargets) * 100;
 
     grid.innerHTML = '';
+    // Hallazgo #7: con 0 aciertos rtMean/rtSd/rtCv son null (UI muestra —);
+    // con 1 acierto rtSd/rtCv son null.
+    var rtMeanDisplay = session.rtMean === null || session.rtMean === undefined ? '—' : fmt(session.rtMean, 0) + ' ms';
+    var rtSdDisplay = session.rtSd === null || session.rtSd === undefined ? '—' : fmt(session.rtSd, 0) + ' ms';
+    var rtCvDisplay = session.rtCv === null || session.rtCv === undefined ? '—' : fmt(session.rtCv, 3);
     var cells = [
       { label: 'Estímulos', value: session.stimuli, cls: '' },
       { label: 'Objetivos', value: session.targets, cls: '' },
       { label: 'Omisiones', value: session.omissions, sub: fmt(omissionPct) + '% de objetivos', cls: 'accent-omission' },
       { label: 'Comisiones', value: session.commissions, sub: fmt(commissionPct) + '% de no-objetivos', cls: 'accent-commission' },
       { label: 'Anticipatorias', value: session.anticipatory, cls: '' },
-      { label: 'RT medio', value: fmt(session.rtMean, 0) + ' ms', cls: 'accent-rt' },
-      { label: 'RT — SD', value: fmt(session.rtSd, 0) + ' ms', cls: '' },
-      { label: 'RT — CV', value: fmt(session.rtCv, 3), cls: '' }
+      { label: 'RT medio', value: rtMeanDisplay, cls: 'accent-rt' },
+      { label: 'RT — SD', value: rtSdDisplay, cls: '' },
+      { label: 'RT — CV', value: rtCvDisplay, cls: '' }
     ];
     cells.forEach(function (c) {
       var cell = document.createElement('div');
@@ -1109,10 +1445,46 @@
       traceEmpty.style.display = 'block';
     }
 
+    // Hallazgo #16: deriva por bloques de 1 min. Bloques sin aciertos se
+    // muestran explícitamente (RT mediana —), no se ocultan.
+    var blocksTable = document.getElementById('blocks-table');
+    var blocksTbody = document.getElementById('blocks-tbody');
+    var blocksEmpty = document.getElementById('blocks-empty');
+    blocksTbody.innerHTML = '';
+    if (!session.trials) {
+      blocksTable.style.display = 'none';
+      blocksEmpty.style.display = 'block';
+      blocksEmpty.textContent = 'No disponible: esta sesión se registró antes de guardar datos por trial (schemaVersion 1).';
+    } else {
+      var blockTrials = session.trials.map(function (t) {
+        return { isTarget: t.type === 'objetivo', classification: t.classification, rt: t.rt };
+      });
+      var blocks = Logic.computeBlockMetrics(blockTrials, { stimulusMs: STIMULUS_MS, blockMs: BLOCK_MS });
+      if (blocks.length === 0) {
+        blocksTable.style.display = 'none';
+        blocksEmpty.style.display = 'block';
+        blocksEmpty.textContent = 'Sin datos de bloques.';
+      } else {
+        blocksTable.style.display = '';
+        blocksEmpty.style.display = 'none';
+        blocks.forEach(function (b) {
+          var tr = document.createElement('tr');
+          tr.innerHTML =
+            '<td>' + (b.blockIndex + 1) + '</td>' +
+            '<td>' + (b.rtMedianMs === null ? '—' : fmt(b.rtMedianMs, 0) + ' ms') + '</td>' +
+            '<td>' + b.targets + '</td>' +
+            '<td>' + b.omissions + '</td>' +
+            '<td>' + b.commissions + '</td>';
+          blocksTbody.appendChild(tr);
+        });
+      }
+    }
+
     var compareHost = document.getElementById('results-compare');
     if (historySameDuration.length === 0) {
       compareHost.innerHTML = '<div class="empty-state">Sin sesiones previas de ' + session.durationMin + ' min para comparar.</div>';
     } else {
+      // Hallazgo #7: los promedios históricos excluyen valores null (0/1 aciertos).
       var histRtMean = average(historySameDuration.map(function (s) { return s.rtMean; }));
       var histOmission = average(historySameDuration.map(function (s) { return s.targets === 0 ? 0 : (s.omissions / s.targets) * 100; }));
       var histCommission = average(historySameDuration.map(function (s) { return (s.stimuli - s.targets) === 0 ? 0 : (s.commissions / (s.stimuli - s.targets)) * 100; }));
@@ -1125,22 +1497,34 @@
   }
 
   function compareLine(label, value, histValue, unit, decimals, higherIsWorse) {
+    if (value === null || value === undefined || histValue === null || histValue === undefined) {
+      var valueDisplay = (value === null || value === undefined) ? '—' : fmt(value, decimals) + unit;
+      var histDisplay = (histValue === null || histValue === undefined) ? 'sin datos' : fmt(histValue, decimals) + unit;
+      return '<div class="compare-line"><span class="k">' + label + '</span>' +
+        '<span>' + valueDisplay + ' <span class="delta">(histórico ' + histDisplay + ')</span></span></div>';
+    }
     var delta = value - histValue;
     var deltaCls = delta === 0 ? '' : ((higherIsWorse ? delta > 0 : delta < 0) ? 'up' : 'down');
     var sign = delta > 0 ? '+' : '';
     return '<div class="compare-line"><span class="k">' + label + '</span>' +
       '<span>' + fmt(value, decimals) + unit + ' <span class="delta ' + deltaCls + '">(histórico ' + fmt(histValue, decimals) + unit + ', ' + sign + fmt(delta, decimals) + unit + ')</span></span></div>';
   }
+  // Hallazgo #7: excluye null/undefined del promedio (aciertos insuficientes
+  // para RT en esa sesión). Devuelve null si no queda ningún valor.
   function average(arr) {
-    if (arr.length === 0) return 0;
+    var filtered = arr.filter(function (v) { return v !== null && v !== undefined && !isNaN(v); });
+    if (filtered.length === 0) return null;
     var sum = 0;
-    for (var i = 0; i < arr.length; i++) sum += arr[i];
-    return sum / arr.length;
+    for (var i = 0; i < filtered.length; i++) sum += filtered[i];
+    return sum / filtered.length;
   }
 
   // ================= HISTÓRICO =================
+  // Hallazgo #15: tabla y TODOS los gráficos filtrados por duración.
   function renderHistory() {
-    var sessions = loadSessions().sort(function (a, b) { return new Date(a.dateISO) - new Date(b.dateISO); });
+    var sessions = loadSessions()
+      .filter(function (s) { return s.durationMin === state.historyDurationMin; })
+      .sort(function (a, b) { return new Date(a.dateISO) - new Date(b.dateISO); });
     var tbody = document.getElementById('history-tbody');
     var emptyEl = document.getElementById('history-empty');
     tbody.innerHTML = '';
@@ -1169,12 +1553,18 @@
       });
       tbody.querySelectorAll('button[data-id]').forEach(function (btn) {
         btn.addEventListener('click', function () {
-          deleteSession(btn.getAttribute('data-id'));
+          var result = deleteSession(btn.getAttribute('data-id'));
           renderHistory();
+          showToast(
+            result.ok ? 'Sesión borrada.' : 'No se pudo borrar la sesión (' + (result.error && result.error.name) + ').',
+            result.ok ? 'ok' : 'error'
+          );
         });
       });
     }
 
+    // Hallazgo #7: los gráficos históricos excluyen valores null (RT sin
+    // aciertos suficientes) en vez de dibujarlos como 0.
     var chartsEmpty = document.getElementById('hist-charts-empty');
     var rtCanvas = document.getElementById('chart-hist-rt');
     var omCanvas = document.getElementById('chart-hist-omission');
@@ -1185,7 +1575,9 @@
     } else {
       chartsEmpty.style.display = 'none';
       [rtCanvas, omCanvas, comCanvas].forEach(function (c) { c.style.display = 'block'; });
-      drawLineChart(rtCanvas, sessions.map(function (s, i) { return { x: i, y: s.rtMean }; }), {
+      drawLineChart(rtCanvas, sessions
+        .map(function (s, i) { return { x: i, y: s.rtMean }; })
+        .filter(function (p) { return p.y !== null && p.y !== undefined; }), {
         xLabel: 'sesión', yLabel: 'ms', color: getCss('--series-rt')
       });
       drawLineChart(omCanvas, sessions.map(function (s, i) {
@@ -1211,11 +1603,16 @@
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    showToast('Exportadas ' + sessions.length + ' sesión(es).', 'ok');
   });
   document.getElementById('btn-delete-all').addEventListener('click', function () {
     if (window.confirm('¿Borrar todas las sesiones del histórico? Esta acción no se puede deshacer.')) {
-      deleteAllSessions();
+      var result = deleteAllSessions();
       renderHistory();
+      showToast(
+        result.ok ? 'Histórico borrado.' : 'No se pudo borrar el histórico (' + (result.error && result.error.name) + ').',
+        result.ok ? 'ok' : 'error'
+      );
     }
   });
 
