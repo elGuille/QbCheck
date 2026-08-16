@@ -1,0 +1,1399 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>QbCheck web — test de atención</title>
+<style>
+  /* ================= TOKENS ================= */
+  /* Paleta validada con el skill dataviz (validate_palette.js, modo dark,
+     superficie #1a1a19): fondo/base = superficie de gráfico validada,
+     serie RT = azul cat. slot 1, omisiones = aqua slot 3, comisiones =
+     naranja slot 2, movimiento de cabeza = violeta slot 7. Estímulos
+     gris/rojo de la tarea son colores de tarea, no series de datos. */
+  :root {
+    --bg: #1a1a19;
+    --panel: #212220;
+    --panel-raised: #26261f;
+    --border: #37372f;
+    --border-strong: #4a4a3f;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #7d7c72;
+
+    --stim-gray: #d7d9dc;
+    --stim-red: #e34948;
+
+    --series-rt: #3987e5;
+    --series-omission: #199e70;
+    --series-commission: #d95926;
+    --series-movement: #9085e9;
+
+    --cta-bg: #ffffff;
+    --cta-text: #16160f;
+    --danger: #e34948;
+
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+
+    --radius: 3px;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3, p, ul, ol { margin: 0; }
+  button { font-family: inherit; }
+  :focus-visible {
+    outline: 2px solid var(--series-rt);
+    outline-offset: 2px;
+  }
+
+  .screen { display: none; min-height: 100%; }
+  .screen.active { display: block; }
+
+  /* ================= NAMEPLATE / SHELL ================= */
+  .shell {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 28px 20px 64px;
+  }
+  .nameplate {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding-bottom: 20px;
+    margin-bottom: 28px;
+    border-bottom: 1px solid var(--border);
+  }
+  .nameplate .brand {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--text-primary);
+  }
+  .nameplate .brand span { color: var(--series-rt); }
+  .nameplate .brand small {
+    display: block;
+    margin-top: 3px;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    color: var(--text-muted);
+    font-weight: 400;
+  }
+  .nameplate nav { display: flex; gap: 8px; }
+  .nameplate nav button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 7px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+  .nameplate nav button:hover { border-color: var(--border-strong); color: var(--text-primary); }
+
+  /* ================= PANELS / CARDS ================= */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+  }
+  .panel + .panel { margin-top: 16px; }
+  .panel-title {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 14px;
+  }
+
+  .notice {
+    font-size: 12px;
+    color: var(--text-muted);
+    border-left: 2px solid var(--border-strong);
+    padding: 8px 12px;
+    line-height: 1.5;
+  }
+  .notice strong { color: var(--text-secondary); font-weight: 600; }
+
+  /* ================= DURATION SELECTOR ================= */
+  .duration-group { display: flex; gap: 8px; }
+  .duration-option {
+    flex: 1;
+    background: var(--panel-raised);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: var(--radius);
+    padding: 14px 10px;
+    text-align: center;
+    cursor: pointer;
+  }
+  .duration-option .num {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 22px;
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+  .duration-option .unit {
+    display: block;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-top: 2px;
+  }
+  .duration-option.selected {
+    border-color: var(--series-rt);
+    box-shadow: inset 0 0 0 1px var(--series-rt);
+  }
+  .duration-option.selected .num { color: var(--series-rt); }
+
+  /* ================= EXAMPLES ================= */
+  .example-row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .example-card {
+    flex: 1;
+    min-width: 220px;
+    background: var(--panel-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .example-stims { display: flex; align-items: center; gap: 14px; justify-content: center; padding: 10px 0 4px; }
+  .example-arrow { color: var(--text-muted); font-family: var(--font-mono); font-size: 13px; }
+  .example-label {
+    text-align: center;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-top: 8px;
+  }
+  .example-label.is-target { color: var(--series-commission); }
+  .example-label.is-nontarget { color: var(--text-muted); }
+
+  .stimulus-shape { display: inline-block; }
+  .stimulus-shape.circle { border-radius: 50%; }
+  .stimulus-shape.square { border-radius: 6px; }
+  .stimulus-shape.gray { background: var(--stim-gray); }
+  .stimulus-shape.red { background: var(--stim-red); }
+
+  /* ================= CAMERA PREVIEW ================= */
+  .camera-row { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .camera-preview {
+    position: relative;
+    width: 180px;
+    height: 135px;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .camera-preview video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+  }
+  .camera-status {
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    background: rgba(0, 0, 0, 0.55);
+    padding: 4px 7px;
+    border-radius: 2px;
+    color: var(--text-secondary);
+  }
+  .camera-status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); }
+  .camera-status .dot.ok { background: var(--series-omission); }
+  .camera-status .dot.searching { background: var(--series-commission); }
+  .camera-status .dot.off { background: var(--danger); }
+  .camera-copy { flex: 1; min-width: 200px; font-size: 12px; color: var(--text-muted); line-height: 1.6; }
+
+  /* ================= CTA ================= */
+  .cta-row { display: flex; justify-content: center; margin-top: 24px; }
+  .cta-button {
+    background: var(--cta-bg);
+    color: var(--cta-text);
+    border: none;
+    border-radius: var(--radius);
+    padding: 16px 48px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .cta-button::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--series-omission);
+    box-shadow: 0 0 6px var(--series-omission);
+  }
+  .cta-button:hover { background: #eeeee6; }
+  .cta-button:disabled { opacity: 0.4; cursor: default; }
+
+  /* ================= TEST SCREEN ================= */
+  #screen-test.active {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .test-stage { position: relative; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  .fixation { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+  .stimulus-live { width: 110px; height: 110px; }
+  .test-hint {
+    position: absolute;
+    bottom: 28px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+  .countdown-overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    z-index: 20;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .countdown-overlay.active { display: flex; }
+  .countdown-number {
+    font-family: var(--font-mono);
+    font-size: 96px;
+    font-weight: 600;
+    color: var(--series-rt);
+  }
+  .countdown-caption { font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-muted); }
+
+  /* ================= METRIC CARDS ================= */
+  .metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .metric-cell { background: var(--panel); padding: 16px; }
+  .metric-cell .label { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted); }
+  .metric-cell .value { font-family: var(--font-mono); font-size: 24px; font-weight: 600; margin-top: 6px; color: var(--text-primary); }
+  .metric-cell .sub { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); margin-top: 3px; }
+  .metric-cell .value.accent-rt { color: var(--series-rt); }
+  .metric-cell .value.accent-omission { color: var(--series-omission); }
+  .metric-cell .value.accent-commission { color: var(--series-commission); }
+
+  .compare-line { display: flex; justify-content: space-between; font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); font-family: var(--font-mono); }
+  .compare-line:last-child { border-bottom: none; }
+  .compare-line .k { color: var(--text-muted); font-family: var(--font-ui); }
+  .compare-line .delta.up { color: var(--series-commission); }
+  .compare-line .delta.down { color: var(--series-omission); }
+
+  canvas.chart { width: 100%; display: block; }
+
+  /* ================= HISTORY TABLE ================= */
+  .table-wrap { overflow-x: auto; }
+  table.history { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.history th, table.history td {
+    text-align: right;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+  }
+  table.history th:first-child, table.history td:first-child { text-align: left; font-family: var(--font-ui); }
+  table.history th {
+    color: var(--text-muted);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  table.history td.del button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--danger);
+    border-radius: var(--radius);
+    padding: 3px 8px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .history-toolbar { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    border-radius: var(--radius);
+    padding: 8px 14px;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .btn-ghost:hover { border-color: var(--border-strong); color: var(--text-primary); }
+  .btn-ghost.danger { color: var(--danger); border-color: #4a2a29; }
+
+  .mini-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .mini-chart-title { font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; }
+
+  .empty-state { font-size: 12px; color: var(--text-muted); padding: 20px 0; text-align: center; }
+  .row-gap { margin-top: 16px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 640px) {
+    .two-col { grid-template-columns: 1fr; }
+    .countdown-number { font-size: 64px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ================= INICIO ================= -->
+<section id="screen-inicio" class="screen active">
+  <div class="shell">
+    <div class="nameplate">
+      <div class="brand">QB<span>CHECK</span><small>test de atención continua · 1-back</small></div>
+      <nav><button type="button" data-nav="historico">Histórico</button></nav>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Duración de la sesión</div>
+      <div class="duration-group" id="duration-group" role="radiogroup" aria-label="Duración">
+        <div class="duration-option" data-duration="5" role="radio" aria-checked="false" tabindex="0">
+          <span class="num">5</span><span class="unit">min · 150 estímulos</span>
+        </div>
+        <div class="duration-option selected" data-duration="10" role="radio" aria-checked="true" tabindex="0">
+          <span class="num">10</span><span class="unit">min · 300 estímulos</span>
+        </div>
+        <div class="duration-option" data-duration="20" role="radio" aria-checked="false" tabindex="0">
+          <span class="num">20</span><span class="unit">min · 600 estímulos</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Cómo funciona</div>
+      <p style="font-size:13px; color:var(--text-secondary); line-height:1.6;">
+        Aparece una figura cada 2 segundos. Pulsa <strong style="color:var(--text-primary)">espacio</strong>
+        o toca/haz clic en cualquier parte de la pantalla solo cuando la figura actual
+        sea <strong style="color:var(--text-primary)">igual en forma y color</strong> que la anterior.
+      </p>
+      <div class="example-row row-gap">
+        <div class="example-card">
+          <div class="example-stims" id="example-target"></div>
+          <div class="example-label is-target">Coincide → objetivo, responde</div>
+        </div>
+        <div class="example-card">
+          <div class="example-stims" id="example-nontarget"></div>
+          <div class="example-label is-nontarget">No coincide → no respondas</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Cámara (opcional — actividad motora)</div>
+      <div class="camera-row">
+        <div class="camera-preview">
+          <video id="preview-video" muted playsinline autoplay></video>
+          <div class="camera-status"><span class="dot off" id="camera-dot"></span><span id="camera-label">iniciando…</span></div>
+        </div>
+        <div class="camera-copy">
+          El vídeo se procesa en tu navegador y nunca se guarda ni se transmite.
+          Solo se usa la posición de la punta de la nariz para medir movimiento durante la prueba.
+          Si no das permiso, el test funciona igual, sin esa métrica.
+        </div>
+      </div>
+    </div>
+
+    <div class="notice">
+      <strong>Herramienta orientativa. No es un instrumento diagnóstico.</strong>
+      Los resultados no sustituyen una evaluación clínica.
+    </div>
+
+    <div class="cta-row">
+      <button type="button" class="cta-button" id="btn-empezar">Empezar</button>
+    </div>
+  </div>
+</section>
+
+<!-- ================= TEST ================= -->
+<section id="screen-test" class="screen">
+  <div class="test-stage" id="test-stage">
+    <div class="fixation" id="fixation"></div>
+    <div class="stimulus-shape stimulus-live" id="stimulus-live" style="display:none;"></div>
+    <div class="test-hint">Esc para abortar</div>
+  </div>
+</section>
+<div class="countdown-overlay" id="countdown-overlay">
+  <div class="countdown-number" id="countdown-number">3</div>
+  <div class="countdown-caption">preparando…</div>
+</div>
+
+<!-- ================= RESULTADOS ================= -->
+<section id="screen-resultados" class="screen">
+  <div class="shell">
+    <div class="nameplate">
+      <div class="brand">QB<span>CHECK</span><small>resultados de sesión</small></div>
+      <nav>
+        <button type="button" data-nav="inicio">Inicio</button>
+        <button type="button" data-nav="historico">Histórico</button>
+      </nav>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Métricas de la sesión</div>
+      <div class="metric-grid" id="results-metric-grid"></div>
+    </div>
+
+    <div class="two-col row-gap">
+      <div class="panel">
+        <div class="panel-title">Tiempo de reacción por estímulo</div>
+        <canvas class="chart" id="chart-rt" height="200"></canvas>
+      </div>
+      <div class="panel">
+        <div class="panel-title">Traza de movimiento de cabeza</div>
+        <canvas class="chart" id="chart-trace" height="200"></canvas>
+        <div class="empty-state" id="trace-empty" style="display:none;">Actividad no disponible</div>
+      </div>
+    </div>
+
+    <div class="panel row-gap">
+      <div class="panel-title">Comparación con el histórico (misma duración)</div>
+      <div id="results-compare"></div>
+    </div>
+
+    <div class="notice row-gap">
+      <strong>Herramienta orientativa. No es un instrumento diagnóstico.</strong>
+      Los resultados no sustituyen una evaluación clínica.
+    </div>
+  </div>
+</section>
+
+<!-- ================= HISTÓRICO ================= -->
+<section id="screen-historico" class="screen">
+  <div class="shell">
+    <div class="nameplate">
+      <div class="brand">QB<span>CHECK</span><small>histórico de sesiones</small></div>
+      <nav><button type="button" data-nav="inicio">Inicio</button></nav>
+    </div>
+
+    <div class="history-toolbar">
+      <button type="button" class="btn-ghost" id="btn-export">Exportar JSON</button>
+      <button type="button" class="btn-ghost danger" id="btn-delete-all">Borrar todo</button>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Sesiones</div>
+      <div class="table-wrap">
+        <table class="history" id="history-table">
+          <thead>
+            <tr>
+              <th>Fecha</th><th>Duración</th><th>Estímulos</th><th>Omisión %</th>
+              <th>Comisión %</th><th>RT medio</th><th>RT SD</th><th>RT CV</th><th>Anticip.</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="history-tbody"></tbody>
+        </table>
+      </div>
+      <div class="empty-state" id="history-empty" style="display:none;">Todavía no hay sesiones registradas.</div>
+    </div>
+
+    <div class="panel row-gap">
+      <div class="panel-title">Evolución de métricas clave</div>
+      <div class="mini-charts">
+        <div>
+          <div class="mini-chart-title" style="color:var(--series-rt)">RT medio (ms)</div>
+          <canvas class="chart" id="chart-hist-rt" height="140"></canvas>
+        </div>
+        <div>
+          <div class="mini-chart-title" style="color:var(--series-omission)">Omisión (%)</div>
+          <canvas class="chart" id="chart-hist-omission" height="140"></canvas>
+        </div>
+        <div>
+          <div class="mini-chart-title" style="color:var(--series-commission)">Comisión (%)</div>
+          <canvas class="chart" id="chart-hist-commission" height="140"></canvas>
+        </div>
+      </div>
+      <div class="empty-state" id="hist-charts-empty" style="display:none;">Todavía no hay sesiones registradas.</div>
+    </div>
+  </div>
+</section>
+
+<!-- Vídeo oculto usado solo como fuente para MediaPipe durante el test. Nunca se graba ni se transmite. -->
+<video id="hidden-video" style="display:none;" muted playsinline autoplay></video>
+
+<script src="logic.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  var Logic = window.QbCheckLogic;
+  if (!Logic) {
+    document.body.innerHTML = '<p style="color:#e34948;padding:24px;font-family:sans-serif;">' +
+      'No se pudo cargar logic.js. Abre index.html desde la misma carpeta donde está logic.js.</p>';
+    throw new Error('QbCheckLogic no disponible');
+  }
+
+  var STORAGE_KEY = 'qbcheck.sessions';
+  var STIMULUS_MS = 2000;
+  var STIMULUS_VISIBLE_MS = 100;
+  var COUNTDOWN_S = 3;
+  var TRACK_FPS = 15;
+  var TRACK_INTERVAL_MS = 1000 / TRACK_FPS;
+  // Umbral de velocidad (en anchuras de cara por segundo) por encima del cual
+  // se considera que la cabeza está "en movimiento" para el % de tiempo activo.
+  var MOVEMENT_SPEED_THRESHOLD = 0.08;
+
+  // ---------------- Estado de la app ----------------
+  var state = {
+    durationMin: 10,
+    activeScreen: 'inicio',
+    camera: {
+      stream: null,
+      landmarker: null,
+      available: false,
+      faceDetected: false
+    },
+    test: null // se construye al empezar una sesión
+  };
+
+  // ================= NAVEGACIÓN =================
+  function showScreen(name) {
+    var screens = document.querySelectorAll('.screen');
+    for (var i = 0; i < screens.length; i++) screens[i].classList.remove('active');
+    var target = document.getElementById('screen-' + name);
+    if (target) target.classList.add('active');
+    state.activeScreen = name;
+
+    if (name === 'inicio') {
+      ensureCameraPreview();
+    } else {
+      stopCameraPreviewOnly();
+    }
+    if (name === 'historico') renderHistory();
+  }
+
+  document.querySelectorAll('[data-nav]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      showScreen(btn.getAttribute('data-nav'));
+    });
+  });
+
+  // ================= EJEMPLOS VISUALES (pantalla inicio) =================
+  function makeShapeEl(shape, color, size) {
+    var el = document.createElement('div');
+    el.className = 'stimulus-shape ' + shape + ' ' + color;
+    el.style.width = size + 'px';
+    el.style.height = size + 'px';
+    return el;
+  }
+
+  (function renderExamples() {
+    var targetHost = document.getElementById('example-target');
+    var a = makeShapeEl('circle', 'red', 40);
+    var arrow1 = document.createElement('span');
+    arrow1.className = 'example-arrow';
+    arrow1.textContent = '→';
+    var b = makeShapeEl('circle', 'red', 40);
+    targetHost.appendChild(a);
+    targetHost.appendChild(arrow1);
+    targetHost.appendChild(b);
+
+    var nonHost = document.getElementById('example-nontarget');
+    var c = makeShapeEl('square', 'gray', 40);
+    var arrow2 = document.createElement('span');
+    arrow2.className = 'example-arrow';
+    arrow2.textContent = '→';
+    var d = makeShapeEl('circle', 'red', 40);
+    nonHost.appendChild(c);
+    nonHost.appendChild(arrow2);
+    nonHost.appendChild(d);
+  })();
+
+  // ================= SELECTOR DE DURACIÓN =================
+  var durationGroup = document.getElementById('duration-group');
+  durationGroup.querySelectorAll('.duration-option').forEach(function (opt) {
+    opt.addEventListener('click', selectDuration);
+    opt.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectDuration.call(opt); }
+    });
+  });
+  function selectDuration() {
+    durationGroup.querySelectorAll('.duration-option').forEach(function (o) {
+      o.classList.remove('selected');
+      o.setAttribute('aria-checked', 'false');
+    });
+    this.classList.add('selected');
+    this.setAttribute('aria-checked', 'true');
+    state.durationMin = parseInt(this.getAttribute('data-duration'), 10);
+  }
+
+  // ================= CÁMARA / MEDIAPIPE =================
+  // Intenta obtener la cámara y cargar MediaPipe Tasks Vision desde CDN.
+  // Cualquier fallo (permiso denegado, sin red, error de carga del modelo)
+  // deja state.camera.available = false y el test sigue funcionando igual,
+  // sin métricas de actividad.
+  //
+  // El modelo (FaceLandmarker) se carga UNA sola vez y se reutiliza entre
+  // sesiones. El stream de cámara, en cambio, se detiene al terminar cada
+  // sesión (para no dejar la cámara encendida de fondo) y debe volver a
+  // pedirse cada vez que se entra en la pantalla de inicio.
+  var landmarkerPromise = null;
+  function ensureLandmarker() {
+    if (landmarkerPromise) return landmarkerPromise;
+    landmarkerPromise = (async function () {
+      try {
+        var visionModule = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+        var FilesetResolver = visionModule.FilesetResolver;
+        var FaceLandmarker = visionModule.FaceLandmarker;
+        var filesetResolver = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+        );
+        var landmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+          baseOptions: {
+            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+            delegate: 'GPU'
+          },
+          runningMode: 'VIDEO',
+          numFaces: 1
+        });
+        state.camera.landmarker = landmarker;
+        return landmarker;
+      } catch (err) {
+        state.camera.landmarker = null;
+        return null;
+      }
+    })();
+    return landmarkerPromise;
+  }
+
+  var streamPromise = null;
+  function ensureStream() {
+    if (state.camera.stream) return Promise.resolve(state.camera.stream);
+    if (streamPromise) return streamPromise;
+    streamPromise = (async function () {
+      var previewVideo = document.getElementById('preview-video');
+      var hiddenVideo = document.getElementById('hidden-video');
+      try {
+        var stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 }, audio: false });
+        state.camera.stream = stream;
+        previewVideo.srcObject = stream;
+        hiddenVideo.srcObject = stream;
+        await previewVideo.play().catch(function () {});
+        await hiddenVideo.play().catch(function () {});
+        setCameraStatus('searching', 'buscando cara…');
+        return stream;
+      } catch (err) {
+        setCameraStatus('off', 'cámara no disponible');
+        state.camera.available = false;
+        return null;
+      } finally {
+        streamPromise = null;
+      }
+    })();
+    return streamPromise;
+  }
+
+  // Orquesta stream + modelo. Se puede llamar varias veces (idempotente):
+  // reutiliza el modelo ya cargado y solo repite lo que haga falta (p.ej.
+  // reabrir el stream tras una sesión anterior).
+  function initCameraAndModel() {
+    return Promise.all([ensureStream(), ensureLandmarker()]).then(function (results) {
+      var stream = results[0], landmarker = results[1];
+      if (stream && landmarker) {
+        state.camera.available = true;
+        startPreviewDetectionLoop();
+      } else if (!landmarker) {
+        state.camera.available = false;
+        setCameraStatus('off', 'seguimiento no disponible');
+      }
+    });
+  }
+
+  function setCameraStatus(kind, label) {
+    var dot = document.getElementById('camera-dot');
+    var text = document.getElementById('camera-label');
+    if (!dot || !text) return;
+    dot.className = 'dot ' + kind;
+    text.textContent = label;
+  }
+
+  var previewLoopHandle = null;
+  function startPreviewDetectionLoop() {
+    var previewVideo = document.getElementById('preview-video');
+    var lastT = 0;
+    function tick(ts) {
+      if (state.activeScreen !== 'inicio' || !state.camera.landmarker) return;
+      previewLoopHandle = requestAnimationFrame(tick);
+      if (ts - lastT < TRACK_INTERVAL_MS) return;
+      lastT = ts;
+      try {
+        var result = state.camera.landmarker.detectForVideo(previewVideo, performance.now());
+        var found = result && result.faceLandmarks && result.faceLandmarks.length > 0;
+        state.camera.faceDetected = found;
+        setCameraStatus(found ? 'ok' : 'searching', found ? 'cara detectada' : 'buscando cara…');
+      } catch (err) {
+        // ignora errores puntuales de detección durante la preview
+      }
+    }
+    previewLoopHandle = requestAnimationFrame(tick);
+  }
+
+  function ensureCameraPreview() {
+    initCameraAndModel();
+    if (state.camera.landmarker && !previewLoopHandle) startPreviewDetectionLoop();
+  }
+  function stopCameraPreviewOnly() {
+    if (previewLoopHandle) { cancelAnimationFrame(previewLoopHandle); previewLoopHandle = null; }
+  }
+  function stopCameraStream() {
+    stopCameraPreviewOnly();
+    if (state.camera.stream) {
+      state.camera.stream.getTracks().forEach(function (t) { t.stop(); });
+      state.camera.stream = null;
+    }
+  }
+
+  // ================= LANDMARKS: ÍNDICES =================
+  var LM_NOSE_TIP = 1;
+  var LM_LEFT_EYE_OUTER = 33;
+  var LM_RIGHT_EYE_OUTER = 263;
+
+  function interocularDistance(landmarks) {
+    var l = landmarks[LM_LEFT_EYE_OUTER];
+    var r = landmarks[LM_RIGHT_EYE_OUTER];
+    var dx = l.x - r.x, dy = l.y - r.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  // ================= SCHEDULER DEL TEST =================
+  function startCountdownThenTest() {
+    var overlay = document.getElementById('countdown-overlay');
+    var numberEl = document.getElementById('countdown-number');
+    var n = COUNTDOWN_S;
+    overlay.classList.add('active');
+    numberEl.textContent = String(n);
+    var startedAt = performance.now();
+    function tick() {
+      var elapsed = (performance.now() - startedAt) / 1000;
+      var remaining = COUNTDOWN_S - Math.floor(elapsed);
+      if (remaining !== n && remaining >= 0) { n = remaining; numberEl.textContent = n > 0 ? String(n) : 'ya'; }
+      if (elapsed >= COUNTDOWN_S) {
+        overlay.classList.remove('active');
+        beginTest();
+        return;
+      }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  document.getElementById('btn-empezar').addEventListener('click', function () {
+    startCountdownThenTest();
+  });
+
+  function beginTest() {
+    var n = state.durationMin * 30; // 2000ms de cadencia -> 30 estímulos/min
+    var sequence = Logic.generateSequence(n);
+    var test = {
+      n: n,
+      sequence: sequence,
+      trials: sequence.map(function (s) { return { isTarget: s.isTarget, classification: null, rt: null, responseOffsetMs: null }; }),
+      onsets: new Array(n),
+      startTime: 0,
+      nextIndex: 0,
+      activeIndex: -1,
+      rafHandle: null,
+      aborted: false,
+      finished: false,
+      activity: {
+        samples: [], // { x, y, t } en unidades de anchura de cara (ya normalizadas)
+        lastSampleT: 0
+      }
+    };
+    state.test = test;
+
+    showScreen('test');
+    document.getElementById('stimulus-live').style.display = 'none';
+    document.getElementById('fixation').style.display = 'block';
+
+    initCameraAndModel(); // por si el usuario no había pasado por inicio (no debería, pero por robustez)
+
+    test.startTime = performance.now();
+    test.rafHandle = requestAnimationFrame(function frame(ts) { testFrame(test, ts); });
+  }
+
+  function testFrame(test, ts) {
+    if (test.aborted) return;
+    var now = performance.now();
+    var elapsed = now - test.startTime;
+
+    // Avance de estímulos: dispara cada onset teórico calculado desde
+    // startTime (sin acumular timeouts, comparación contra tiempo absoluto).
+    while (test.nextIndex < test.n && elapsed >= test.nextIndex * STIMULUS_MS) {
+      var idx = test.nextIndex;
+      if (test.activeIndex >= 0) closeResponseWindow(test, test.activeIndex);
+      test.onsets[idx] = test.startTime + idx * STIMULUS_MS;
+      test.activeIndex = idx;
+      showStimulus(test.sequence[idx]);
+      test.nextIndex++;
+    }
+
+    // Ocultar el estímulo tras STIMULUS_VISIBLE_MS (comparación de tiempo
+    // absoluto, no setTimeout acumulativo).
+    if (test.activeIndex >= 0) {
+      var onset = test.onsets[test.activeIndex];
+      if (now - onset >= STIMULUS_VISIBLE_MS) hideStimulus();
+    }
+
+    sampleActivity(test, now);
+
+    if (elapsed >= test.n * STIMULUS_MS) {
+      if (test.activeIndex >= 0) closeResponseWindow(test, test.activeIndex);
+      finishTest(test);
+      return;
+    }
+
+    test.rafHandle = requestAnimationFrame(function frame(ts2) { testFrame(test, ts2); });
+  }
+
+  function showStimulus(stim) {
+    var el = document.getElementById('stimulus-live');
+    el.className = 'stimulus-shape stimulus-live ' + stim.shape + ' ' + stim.color;
+    el.style.display = 'block';
+    document.getElementById('fixation').style.display = 'none';
+  }
+  function hideStimulus() {
+    var el = document.getElementById('stimulus-live');
+    if (el.style.display !== 'none') {
+      el.style.display = 'none';
+      document.getElementById('fixation').style.display = 'block';
+    }
+  }
+
+  function closeResponseWindow(test, idx) {
+    var trial = test.trials[idx];
+    if (trial.classification === null) {
+      trial.classification = Logic.classifyResponse({ isTarget: trial.isTarget, responseOffsetMs: null });
+    }
+  }
+
+  function registerResponse() {
+    var test = state.test;
+    if (!test || test.aborted || test.finished) return;
+    var idx = test.activeIndex;
+    if (idx < 0) return;
+    var trial = test.trials[idx];
+    if (trial.classification !== null) return; // solo cuenta la primera respuesta de la ventana
+    var onset = test.onsets[idx];
+    var offset = performance.now() - onset;
+    if (offset > STIMULUS_MS) return; // fuera de ventana (no debería pasar por el flujo normal)
+    trial.responseOffsetMs = offset;
+    trial.classification = Logic.classifyResponse({ isTarget: trial.isTarget, responseOffsetMs: offset });
+    if (trial.classification === 'hit') trial.rt = offset;
+  }
+
+  function sampleActivity(test, now) {
+    if (!state.camera.available || !state.camera.landmarker) return;
+    if (now - test.activity.lastSampleT < TRACK_INTERVAL_MS) return;
+    test.activity.lastSampleT = now;
+    var hiddenVideo = document.getElementById('hidden-video');
+    try {
+      var result = state.camera.landmarker.detectForVideo(hiddenVideo, now);
+      if (!result || !result.faceLandmarks || result.faceLandmarks.length === 0) return;
+      var landmarks = result.faceLandmarks[0];
+      var iod = interocularDistance(landmarks);
+      if (!iod || iod <= 0) return;
+      var nose = landmarks[LM_NOSE_TIP];
+      // Normalización por distancia interocular: coordenadas en unidades de
+      // "anchura de cara", invariantes a la distancia a la cámara.
+      test.activity.samples.push({ x: nose.x / iod, y: nose.y / iod, t: now });
+    } catch (err) {
+      // ignora errores puntuales de detección
+    }
+  }
+
+  function computeActivityMetrics(samples) {
+    if (!samples || samples.length < 2) return null;
+    var pathLength = 0;
+    var movingIntervals = 0;
+    var totalIntervals = 0;
+    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (var i = 0; i < samples.length; i++) {
+      var s = samples[i];
+      if (s.x < minX) minX = s.x;
+      if (s.x > maxX) maxX = s.x;
+      if (s.y < minY) minY = s.y;
+      if (s.y > maxY) maxY = s.y;
+      if (i > 0) {
+        var prev = samples[i - 1];
+        var dx = s.x - prev.x, dy = s.y - prev.y;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        var dt = (s.t - prev.t) / 1000;
+        pathLength += dist;
+        totalIntervals++;
+        if (dt > 0 && dist / dt > MOVEMENT_SPEED_THRESHOLD) movingIntervals++;
+      }
+    }
+    var movingPct = totalIntervals === 0 ? 0 : (movingIntervals / totalIntervals) * 100;
+    var area = (maxX - minX) * (maxY - minY);
+    var trace = Logic.subsampleTrace(samples.map(function (s) { return { x: s.x, y: s.y }; }), 2000);
+    return { pathLength: pathLength, movingPct: movingPct, area: area, trace: trace };
+  }
+
+  function finishTest(test) {
+    test.finished = true;
+    if (test.rafHandle) cancelAnimationFrame(test.rafHandle);
+    stopCameraStream();
+
+    var metrics = Logic.computeSessionMetrics(test.trials);
+    var activity = computeActivityMetrics(test.activity.samples);
+
+    var session = {
+      id: (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('s_' + Date.now() + '_' + Math.floor(Math.random() * 1e6)),
+      dateISO: new Date().toISOString(),
+      durationMin: state.durationMin,
+      stimuli: metrics.stimuli,
+      targets: metrics.targets,
+      omissions: metrics.omissions,
+      commissions: metrics.commissions,
+      anticipatory: metrics.anticipatory,
+      rtMean: metrics.rtMean,
+      rtSd: metrics.rtSd,
+      rtCv: metrics.rtCv,
+      rtSeries: metrics.rtSeries,
+      activity: activity
+    };
+
+    var historyBefore = loadSessions().filter(function (s) { return s.durationMin === session.durationMin; });
+    saveSession(session);
+    renderResults(session, historyBefore);
+    showScreen('resultados');
+  }
+
+  function abortTest() {
+    var test = state.test;
+    if (!test || test.finished) return;
+    test.aborted = true;
+    if (test.rafHandle) cancelAnimationFrame(test.rafHandle);
+    stopCameraStream();
+    state.test = null;
+    showScreen('inicio');
+  }
+
+  // ================= ENTRADA: TECLADO Y CLIC =================
+  document.addEventListener('keydown', function (e) {
+    if (state.activeScreen !== 'test') return;
+    if (e.code === 'Escape') { abortTest(); return; }
+    if (e.code === 'Space') { e.preventDefault(); registerResponse(); }
+  });
+  document.getElementById('test-stage').addEventListener('pointerdown', function () {
+    if (state.activeScreen === 'test') registerResponse();
+  });
+
+  // ================= PERSISTENCIA =================
+  function loadSessions() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return [];
+      var parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (err) {
+      return [];
+    }
+  }
+  function saveAllSessions(sessions) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+    } catch (err) {
+      // localStorage lleno o no disponible: no interrumpe el flujo de la app
+    }
+  }
+  function saveSession(session) {
+    var sessions = loadSessions();
+    sessions.push(session);
+    saveAllSessions(sessions);
+  }
+  function deleteSession(id) {
+    var sessions = loadSessions().filter(function (s) { return s.id !== id; });
+    saveAllSessions(sessions);
+  }
+  function deleteAllSessions() {
+    saveAllSessions([]);
+  }
+
+  // ================= FORMATEO =================
+  function fmt(n, decimals) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return n.toFixed(decimals === undefined ? 1 : decimals);
+  }
+  function fmtDate(iso) {
+    var d = new Date(iso);
+    return d.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: '2-digit' }) +
+      ' ' + d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  // ================= RESULTADOS =================
+  function renderResults(session, historySameDuration) {
+    var grid = document.getElementById('results-metric-grid');
+    var omissionPct = session.targets === 0 ? 0 : (session.omissions / session.targets) * 100;
+    var nonTargets = session.stimuli - session.targets;
+    var commissionPct = nonTargets === 0 ? 0 : (session.commissions / nonTargets) * 100;
+
+    grid.innerHTML = '';
+    var cells = [
+      { label: 'Estímulos', value: session.stimuli, cls: '' },
+      { label: 'Objetivos', value: session.targets, cls: '' },
+      { label: 'Omisiones', value: session.omissions, sub: fmt(omissionPct) + '% de objetivos', cls: 'accent-omission' },
+      { label: 'Comisiones', value: session.commissions, sub: fmt(commissionPct) + '% de no-objetivos', cls: 'accent-commission' },
+      { label: 'Anticipatorias', value: session.anticipatory, cls: '' },
+      { label: 'RT medio', value: fmt(session.rtMean, 0) + ' ms', cls: 'accent-rt' },
+      { label: 'RT — SD', value: fmt(session.rtSd, 0) + ' ms', cls: '' },
+      { label: 'RT — CV', value: fmt(session.rtCv, 3), cls: '' }
+    ];
+    cells.forEach(function (c) {
+      var cell = document.createElement('div');
+      cell.className = 'metric-cell';
+      cell.innerHTML = '<div class="label">' + c.label + '</div>' +
+        '<div class="value ' + c.cls + '">' + c.value + '</div>' +
+        (c.sub ? '<div class="sub">' + c.sub + '</div>' : '');
+      grid.appendChild(cell);
+    });
+
+    drawLineChart(document.getElementById('chart-rt'), session.rtSeries.map(function (p) { return { x: p.index, y: p.rt }; }), {
+      xLabel: 'índice de estímulo', yLabel: 'RT (ms)', color: getCss('--series-rt')
+    });
+
+    var traceCanvas = document.getElementById('chart-trace');
+    var traceEmpty = document.getElementById('trace-empty');
+    if (session.activity && session.activity.trace && session.activity.trace.length > 1) {
+      traceCanvas.style.display = 'block';
+      traceEmpty.style.display = 'none';
+      drawTraceChart(traceCanvas, session.activity.trace, getCss('--series-movement'));
+    } else {
+      traceCanvas.style.display = 'none';
+      traceEmpty.style.display = 'block';
+    }
+
+    var compareHost = document.getElementById('results-compare');
+    if (historySameDuration.length === 0) {
+      compareHost.innerHTML = '<div class="empty-state">Sin sesiones previas de ' + session.durationMin + ' min para comparar.</div>';
+    } else {
+      var histRtMean = average(historySameDuration.map(function (s) { return s.rtMean; }));
+      var histOmission = average(historySameDuration.map(function (s) { return s.targets === 0 ? 0 : (s.omissions / s.targets) * 100; }));
+      var histCommission = average(historySameDuration.map(function (s) { return (s.stimuli - s.targets) === 0 ? 0 : (s.commissions / (s.stimuli - s.targets)) * 100; }));
+      compareHost.innerHTML =
+        compareLine('RT medio', session.rtMean, histRtMean, ' ms', 0, true) +
+        compareLine('Omisión %', omissionPct, histOmission, '%', 1, true) +
+        compareLine('Comisión %', commissionPct, histCommission, '%', 1, true) +
+        '<div class="compare-line"><span class="k">Sesiones históricas comparadas</span><span>' + historySameDuration.length + '</span></div>';
+    }
+  }
+
+  function compareLine(label, value, histValue, unit, decimals, higherIsWorse) {
+    var delta = value - histValue;
+    var deltaCls = delta === 0 ? '' : ((higherIsWorse ? delta > 0 : delta < 0) ? 'up' : 'down');
+    var sign = delta > 0 ? '+' : '';
+    return '<div class="compare-line"><span class="k">' + label + '</span>' +
+      '<span>' + fmt(value, decimals) + unit + ' <span class="delta ' + deltaCls + '">(histórico ' + fmt(histValue, decimals) + unit + ', ' + sign + fmt(delta, decimals) + unit + ')</span></span></div>';
+  }
+  function average(arr) {
+    if (arr.length === 0) return 0;
+    var sum = 0;
+    for (var i = 0; i < arr.length; i++) sum += arr[i];
+    return sum / arr.length;
+  }
+
+  // ================= HISTÓRICO =================
+  function renderHistory() {
+    var sessions = loadSessions().sort(function (a, b) { return new Date(a.dateISO) - new Date(b.dateISO); });
+    var tbody = document.getElementById('history-tbody');
+    var emptyEl = document.getElementById('history-empty');
+    tbody.innerHTML = '';
+
+    if (sessions.length === 0) {
+      emptyEl.style.display = 'block';
+    } else {
+      emptyEl.style.display = 'none';
+      sessions.slice().reverse().forEach(function (s) {
+        var omissionPct = s.targets === 0 ? 0 : (s.omissions / s.targets) * 100;
+        var nonTargets = s.stimuli - s.targets;
+        var commissionPct = nonTargets === 0 ? 0 : (s.commissions / nonTargets) * 100;
+        var tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td>' + fmtDate(s.dateISO) + '</td>' +
+          '<td>' + s.durationMin + ' min</td>' +
+          '<td>' + s.stimuli + '</td>' +
+          '<td>' + fmt(omissionPct) + '</td>' +
+          '<td>' + fmt(commissionPct) + '</td>' +
+          '<td>' + fmt(s.rtMean, 0) + '</td>' +
+          '<td>' + fmt(s.rtSd, 0) + '</td>' +
+          '<td>' + fmt(s.rtCv, 3) + '</td>' +
+          '<td>' + s.anticipatory + '</td>' +
+          '<td class="del"><button type="button" data-id="' + s.id + '">Borrar</button></td>';
+        tbody.appendChild(tr);
+      });
+      tbody.querySelectorAll('button[data-id]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          deleteSession(btn.getAttribute('data-id'));
+          renderHistory();
+        });
+      });
+    }
+
+    var chartsEmpty = document.getElementById('hist-charts-empty');
+    var rtCanvas = document.getElementById('chart-hist-rt');
+    var omCanvas = document.getElementById('chart-hist-omission');
+    var comCanvas = document.getElementById('chart-hist-commission');
+    if (sessions.length === 0) {
+      chartsEmpty.style.display = 'block';
+      [rtCanvas, omCanvas, comCanvas].forEach(function (c) { c.style.display = 'none'; });
+    } else {
+      chartsEmpty.style.display = 'none';
+      [rtCanvas, omCanvas, comCanvas].forEach(function (c) { c.style.display = 'block'; });
+      drawLineChart(rtCanvas, sessions.map(function (s, i) { return { x: i, y: s.rtMean }; }), {
+        xLabel: 'sesión', yLabel: 'ms', color: getCss('--series-rt')
+      });
+      drawLineChart(omCanvas, sessions.map(function (s, i) {
+        var pct = s.targets === 0 ? 0 : (s.omissions / s.targets) * 100;
+        return { x: i, y: pct };
+      }), { xLabel: 'sesión', yLabel: '%', color: getCss('--series-omission') });
+      drawLineChart(comCanvas, sessions.map(function (s, i) {
+        var nt = s.stimuli - s.targets;
+        var pct = nt === 0 ? 0 : (s.commissions / nt) * 100;
+        return { x: i, y: pct };
+      }), { xLabel: 'sesión', yLabel: '%', color: getCss('--series-commission') });
+    }
+  }
+
+  document.getElementById('btn-export').addEventListener('click', function () {
+    var sessions = loadSessions();
+    var blob = new Blob([JSON.stringify(sessions, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'qbcheck-sesiones-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+  document.getElementById('btn-delete-all').addEventListener('click', function () {
+    if (window.confirm('¿Borrar todas las sesiones del histórico? Esta acción no se puede deshacer.')) {
+      deleteAllSessions();
+      renderHistory();
+    }
+  });
+
+  // ================= GRÁFICOS (canvas nativo) =================
+  function getCss(varName) {
+    return getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+  }
+
+  function setupCanvasDpi(canvas) {
+    var cssWidth = canvas.clientWidth || canvas.parentElement.clientWidth || 400;
+    var cssHeight = parseInt(canvas.getAttribute('height'), 10) || 200;
+    var dpr = window.devicePixelRatio || 1;
+    canvas.width = cssWidth * dpr;
+    canvas.height = cssHeight * dpr;
+    canvas.style.height = cssHeight + 'px';
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx: ctx, width: cssWidth, height: cssHeight };
+  }
+
+  // Línea con ejes etiquetados: eje X = índice/sesión, eje Y = magnitud.
+  function drawLineChart(canvas, points, opts) {
+    var setup = setupCanvasDpi(canvas);
+    var ctx = setup.ctx, W = setup.width, H = setup.height;
+    var muted = getCss('--text-muted');
+    var border = getCss('--border');
+    var textSecondary = getCss('--text-secondary');
+
+    ctx.clearRect(0, 0, W, H);
+
+    var padL = 44, padR = 12, padT = 12, padB = 26;
+    var plotW = W - padL - padR;
+    var plotH = H - padT - padB;
+
+    if (!points || points.length === 0) {
+      ctx.fillStyle = muted;
+      ctx.font = '11px ' + getCss('--font-ui');
+      ctx.fillText('sin datos', padL, H / 2);
+      return;
+    }
+
+    var xs = points.map(function (p) { return p.x; });
+    var ys = points.map(function (p) { return p.y; });
+    var xMin = Math.min.apply(null, xs), xMax = Math.max.apply(null, xs);
+    var yMin = 0, yMax = Math.max.apply(null, ys);
+    if (xMax === xMin) xMax = xMin + 1;
+    if (yMax === yMin) yMax = yMin + 1;
+    yMax *= 1.12;
+
+    function px(x) { return padL + ((x - xMin) / (xMax - xMin)) * plotW; }
+    function py(y) { return padT + plotH - ((y - yMin) / (yMax - yMin)) * plotH; }
+
+    // Gridlines recesivas (horizontales, 4 divisiones)
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    var yTicks = 4;
+    ctx.font = '10px ' + getCss('--font-mono');
+    ctx.fillStyle = muted;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (var i = 0; i <= yTicks; i++) {
+      var yVal = yMin + ((yMax - yMin) * i) / yTicks;
+      var yPix = py(yVal);
+      ctx.beginPath();
+      ctx.moveTo(padL, yPix);
+      ctx.lineTo(padL + plotW, yPix);
+      ctx.stroke();
+      ctx.fillText(fmt(yVal, yVal < 10 ? 2 : 0), padL - 6, yPix);
+    }
+
+    // Eje X: ticks en min/max
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(fmt(xMin, 0), px(xMin), padT + plotH + 6);
+    ctx.fillText(fmt(xMax, 0), px(xMax), padT + plotH + 6);
+
+    // Etiquetas de ejes
+    ctx.font = '10px ' + getCss('--font-ui');
+    ctx.fillStyle = textSecondary;
+    ctx.textAlign = 'center';
+    ctx.fillText(opts.xLabel || '', padL + plotW / 2, H - 4);
+    ctx.save();
+    ctx.translate(10, padT + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText(opts.yLabel || '', 0, 0);
+    ctx.restore();
+
+    // Línea de datos (2px)
+    ctx.strokeStyle = opts.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    points.forEach(function (p, idx) {
+      var x = px(p.x), y = py(p.y);
+      if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Etiqueta directa del último valor
+    var last = points[points.length - 1];
+    ctx.fillStyle = opts.color;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.font = '10px ' + getCss('--font-mono');
+    ctx.fillText(fmt(last.y, last.y < 10 ? 2 : 0), Math.min(px(last.x) + 6, W - padR - 2), py(last.y));
+  }
+
+  // Traza 2D de movimiento de cabeza, ejes en unidades de anchura de cara.
+  function drawTraceChart(canvas, points, color) {
+    var setup = setupCanvasDpi(canvas);
+    var ctx = setup.ctx, W = setup.width, H = setup.height;
+    var muted = getCss('--text-muted');
+    var textSecondary = getCss('--text-secondary');
+    ctx.clearRect(0, 0, W, H);
+
+    var padL = 40, padR = 12, padT = 12, padB = 26;
+    var plotW = W - padL - padR;
+    var plotH = H - padT - padB;
+
+    var xs = points.map(function (p) { return p.x; });
+    var ys = points.map(function (p) { return p.y; });
+    var xMin = Math.min.apply(null, xs), xMax = Math.max.apply(null, xs);
+    var yMin = Math.min.apply(null, ys), yMax = Math.max.apply(null, ys);
+    var rangeX = xMax - xMin || 1;
+    var rangeY = yMax - yMin || 1;
+    var range = Math.max(rangeX, rangeY) * 1.1;
+    var cx = (xMin + xMax) / 2, cy = (yMin + yMax) / 2;
+
+    function px(x) { return padL + ((x - (cx - range / 2)) / range) * plotW; }
+    function py(y) { return padT + ((y - (cy - range / 2)) / range) * plotH; }
+
+    ctx.strokeStyle = getCss('--border');
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, padT + plotH / 2); ctx.lineTo(padL + plotW, padT + plotH / 2);
+    ctx.moveTo(padL + plotW / 2, padT); ctx.lineTo(padL + plotW / 2, padT + plotH);
+    ctx.stroke();
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = 0.85;
+    ctx.beginPath();
+    points.forEach(function (p, idx) {
+      var x = px(p.x), y = py(p.y);
+      if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    // Inicio (hueco) y fin (relleno)
+    var start = points[0], end = points[points.length - 1];
+    ctx.fillStyle = getCss('--bg');
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(px(start.x), py(start.y), 4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(px(end.x), py(end.y), 4, 0, Math.PI * 2); ctx.fill();
+
+    ctx.font = '10px ' + getCss('--font-ui');
+    ctx.fillStyle = textSecondary;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText('x (anchuras de cara)', padL + plotW / 2, H - 4);
+    ctx.save();
+    ctx.translate(10, padT + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('y (anchuras de cara)', 0, 0);
+    ctx.restore();
+  }
+
+  // ================= INICIALIZACIÓN =================
+  ensureCameraPreview();
+  window.addEventListener('resize', function () {
+    if (state.activeScreen === 'resultados' || state.activeScreen === 'historico') {
+      // Redibuja los gráficos visibles al cambiar tamaño de ventana.
+      if (state.activeScreen === 'historico') renderHistory();
+    }
+  });
+})();
+</script>
+</body>
+</html>
