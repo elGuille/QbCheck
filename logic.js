@@ -235,6 +235,18 @@
     return sorted[mid];
   }
 
+  // MAD (median absolute deviation): mediana de |x - mediana(values)|.
+  // null si hay menos de 2 valores: con 0 valores la mediana ya es null, y
+  // con exactamente 1 valor la mediana existe pero la MAD no tiene sentido
+  // estadístico (dispersión de un único punto), así que también es null
+  // (protocolo N-of-1, tarea "métricas robustas por sesión").
+  function medianAbsoluteDeviation(values) {
+    if (!values || values.length < 2) return null;
+    var m = median(values);
+    var deviations = values.map(function (v) { return Math.abs(v - m); });
+    return median(deviations);
+  }
+
   /**
    * Calcula las métricas de una sesión a partir de los trials.
    * Cada trial ya trae su clasificación FINAL (hit/omission/commission/
@@ -277,6 +289,13 @@
     var rtMean = mean(rtValues);
     var rtSd = sampleStdDev(rtValues);
     var rtCv = (rtMean === null || rtSd === null || rtMean === 0) ? null : rtSd / rtMean;
+    // Métricas robustas de RT (protocolo N-of-1): mediana y MAD sobre los
+    // mismos valores de RT de aciertos que rtMean/rtSd. 0 aciertos -> mediana
+    // null (median() de array vacío); <2 aciertos -> MAD null (hallazgo
+    // análogo al #7 para SD: con 1 acierto la mediana existe pero la
+    // dispersión no está definida).
+    var rtMedian = median(rtValues);
+    var rtMad = medianAbsoluteDeviation(rtValues);
 
     return {
       stimuli: stimuli,
@@ -291,7 +310,43 @@
       rtMean: rtMean,
       rtSd: rtSd,
       rtCv: rtCv,
+      rtMedian: rtMedian,
+      rtMad: rtMad,
       rtSeries: rtSeries
+    };
+  }
+
+  /**
+   * Cambio entre la 1ª y la 2ª mitad de la sesión (protocolo N-of-1), por
+   * índice de ensayo (no por tiempo real). División: mid = floor(n/2),
+   * 1ª mitad = trials[0..mid), 2ª mitad = trials[mid..n) — con n impar, el
+   * ensayo del medio cae en la 2ª mitad, igual que el criterio ya usado por
+   * median() para el elemento central en conteos pares/impares.
+   * @param {{isTarget: boolean, classification: string, rt?: number}[]} trials
+   * @returns {{deltaMedianRt:(number|null), deltaOmissionPct:(number|null), firstHalf: object, secondHalf: object}}
+   */
+  function computeHalfSplitDeltas(trials) {
+    if (!Array.isArray(trials) || trials.length === 0) {
+      return { deltaMedianRt: null, deltaOmissionPct: null, firstHalf: null, secondHalf: null };
+    }
+    var mid = Math.floor(trials.length / 2);
+    var firstHalf = computeSessionMetrics(trials.slice(0, mid));
+    var secondHalf = computeSessionMetrics(trials.slice(mid));
+
+    var deltaMedianRt = (firstHalf.rtMedian === null || secondHalf.rtMedian === null)
+      ? null
+      : secondHalf.rtMedian - firstHalf.rtMedian;
+    // Omisiones sin objetivos en alguna mitad -> resta no tiene sentido (0/0
+    // por convención en computeSessionMetrics, pero aquí se exige null).
+    var deltaOmissionPct = (firstHalf.targets === 0 || secondHalf.targets === 0)
+      ? null
+      : secondHalf.omissionPct - firstHalf.omissionPct;
+
+    return {
+      deltaMedianRt: deltaMedianRt,
+      deltaOmissionPct: deltaOmissionPct,
+      firstHalf: firstHalf,
+      secondHalf: secondHalf
     };
   }
 
@@ -468,6 +523,219 @@
     return { pathLength: pathLength, movingPct: movingPct, area: area, trace: trace, coveragePct: coveragePct };
   }
 
+  // ================= PROTOCOLO N-of-1 =================
+  //
+  // Decisión de diseño (documentada también en la spec): una "sesión válida"
+  // para el protocolo es, simplemente, cualquier sesión que llegó a
+  // persistirse en el histórico. El propio flujo de guardado ya descarta
+  // (sin guardar) las sesiones abortadas (hallazgo #1) y las invalidadas por
+  // calidad temporal insuficiente (hallazgo #2) antes de que exista un
+  // objeto de sesión que pasar aquí. No hace falta un filtro de validez
+  // adicional: basta con pasar el resultado de isValidSessionShape/
+  // partitionSessions filtrado por duración.
+  //
+  // Todo el estado del protocolo (familiarización/referencia/actual) se
+  // deriva en cada llamada a partir del orden cronológico de las sesiones
+  // recibidas; nada de esto se persiste, así que borrar una sesión
+  // recalcula el protocolo automáticamente sin dejar estado corrupto.
+
+  var N1_FAMILIARIZATION_COUNT = 3;
+  var N1_REFERENCE_MIN = 6;
+  var N1_REFERENCE_MAX = 10;
+  var N1_CURRENT_COUNT = 3;
+  var N1_METRIC_KEYS = ['omissionPct', 'commissionPct', 'anticipatoryPct', 'rtMedian', 'rtMad'];
+
+  /**
+   * Cuantil sobre un array YA ORDENADO ascendentemente, por interpolación
+   * lineal entre los dos vecinos más próximos (método R-7 / Excel
+   * PERCENTILE.INC, el más común como valor por defecto). Para q=0.5
+   * coincide exactamente con median() en este mismo archivo (mismo criterio
+   * de elemento central en conteos pares/impares).
+   * @param {number[]} sortedValues
+   * @param {number} q - cuantil en [0,1].
+   * @returns {?number}
+   */
+  function quantileSorted(sortedValues, q) {
+    var n = sortedValues.length;
+    if (n === 0) return null;
+    if (n === 1) return sortedValues[0];
+    var pos = q * (n - 1);
+    var lower = Math.floor(pos);
+    var upper = Math.ceil(pos);
+    if (lower === upper) return sortedValues[lower];
+    var frac = pos - lower;
+    return sortedValues[lower] + (sortedValues[upper] - sortedValues[lower]) * frac;
+  }
+
+  /**
+   * Mediana, Q1 y Q3 (rango intercuartílico Q3-Q1) de un conjunto de valores,
+   * filtrando previamente null/undefined/NaN (p.ej. sesiones sin aciertos
+   * suficientes para tener rtMedian). Devuelve null en todos los campos si
+   * no queda ningún valor numérico.
+   * @param {Array<number|null|undefined>} values
+   * @returns {{q1:(number|null), median:(number|null), q3:(number|null), iqr:(number|null), n:number}}
+   */
+  function computeIQR(values) {
+    var filtered = (values || []).filter(function (v) { return typeof v === 'number' && isFinite(v); });
+    if (filtered.length === 0) return { q1: null, median: null, q3: null, iqr: null, n: 0 };
+    var sorted = filtered.slice().sort(function (a, b) { return a - b; });
+    var q1 = quantileSorted(sorted, 0.25);
+    var q3 = quantileSorted(sorted, 0.75);
+    return {
+      q1: q1,
+      median: quantileSorted(sorted, 0.5),
+      q3: q3,
+      iqr: (q1 === null || q3 === null) ? null : q3 - q1,
+      n: sorted.length
+    };
+  }
+
+  /**
+   * ¿value cae dentro del rango de referencia [q1, q3]? Decisión de diseño:
+   * límites INCLUSIVOS (un valor igual a Q1 o Q3 cuenta como "dentro del
+   * rango habitual"), coherente con que Q1/Q3 son parte de la referencia
+   * observada, no un umbral estricto de exclusión.
+   * @param {number} value
+   * @param {?number} q1
+   * @param {?number} q3
+   * @returns {?boolean} null si q1/q3 no están definidos.
+   */
+  function isWithinIQR(value, q1, q3) {
+    if (typeof value !== 'number' || !isFinite(value)) return null;
+    if (q1 === null || q3 === null || q1 === undefined || q3 === undefined) return null;
+    return value >= q1 && value <= q3;
+  }
+
+  /**
+   * Resume una sesión persistida (schemaVersion 1 o 2) al subconjunto de
+   * métricas clave del protocolo N-of-1. Pura: no toca localStorage, solo
+   * lee el objeto de sesión recibido.
+   *
+   * rtMedian/rtMad se RE-DERIVAN de session.trials (cuando existe) en vez de
+   * leerse de un campo persistido: así no hace falta ampliar el esquema de
+   * persistencia (ver nota de schemaVersion en la spec). Sesiones v1
+   * migradas sin trials (trials === null) no pueden recuperar rtMedian/
+   * rtMad y quedan como null para esas dos métricas (se excluyen de su IQR,
+   * pero la sesión sigue contando para familiarización/referencia/actual).
+   * @param {object} session
+   * @returns {{id, dateISO, durationMin, omissionPct:number, commissionPct:number, anticipatoryPct:number, rtMedian:(number|null), rtMad:(number|null)}}
+   */
+  function deriveSessionSummary(session) {
+    var targets = session.targets || 0;
+    var stimuli = session.stimuli || 0;
+    var nonTargets = stimuli - targets;
+    var omissionPct = targets === 0 ? 0 : (session.omissions / targets) * 100;
+    var commissionPct = nonTargets === 0 ? 0 : (session.commissions / nonTargets) * 100;
+    var anticipatoryPct = stimuli === 0 ? 0 : (session.anticipatory / stimuli) * 100;
+
+    var rtMedian = null;
+    var rtMad = null;
+    if (Array.isArray(session.trials)) {
+      var mapped = session.trials.map(function (t) {
+        return { isTarget: t.type === 'objetivo', classification: t.classification, rt: t.rt };
+      });
+      var m = computeSessionMetrics(mapped);
+      rtMedian = m.rtMedian;
+      rtMad = m.rtMad;
+    }
+
+    return {
+      id: session.id,
+      dateISO: session.dateISO,
+      durationMin: session.durationMin,
+      omissionPct: omissionPct,
+      commissionPct: commissionPct,
+      anticipatoryPct: anticipatoryPct,
+      rtMedian: rtMedian,
+      rtMad: rtMad
+    };
+  }
+
+  /**
+   * Calcula el estado completo del protocolo N-of-1 para las sesiones VÁLIDAS
+   * de UNA duración (el llamador filtra por duración antes de invocar esto).
+   * Todo se deriva del orden cronológico de `summaries`; nada se persiste.
+   *
+   * Reglas (ver spec, sección "Protocolo N-of-1"):
+   *  - Familiarización: las 3 primeras sesiones (cronológicas).
+   *  - Referencia: siguientes sesiones post-familiarización, ventana FIJA
+   *    (no móvil) de hasta 10, con mínimo 6 para considerarse completa.
+   *  - Actual: mediana de las ÚLTIMAS 3 sesiones post-referencia (una vez la
+   *    referencia está completa); si aún no hay 3, no disponible.
+   * @param {Array<{id, dateISO, omissionPct, commissionPct, anticipatoryPct, rtMedian:(number|null), rtMad:(number|null)}>} summaries
+   * @returns {object}
+   */
+  function computeNOf1Protocol(summaries) {
+    var sorted = (summaries || []).slice().sort(function (a, b) {
+      return new Date(a.dateISO).getTime() - new Date(b.dateISO).getTime();
+    });
+
+    var familiarization = sorted.slice(0, N1_FAMILIARIZATION_COUNT);
+    var postFamiliarization = sorted.slice(N1_FAMILIARIZATION_COUNT);
+
+    var referenceStatus, referenceSessions, referenceMissing;
+    if (postFamiliarization.length < N1_REFERENCE_MIN) {
+      referenceStatus = 'building';
+      referenceSessions = postFamiliarization.slice();
+      referenceMissing = N1_REFERENCE_MIN - postFamiliarization.length;
+    } else {
+      referenceStatus = 'complete';
+      referenceSessions = postFamiliarization.slice(0, N1_REFERENCE_MAX);
+      referenceMissing = 0;
+    }
+
+    var postReference = referenceStatus === 'complete'
+      ? postFamiliarization.slice(referenceSessions.length)
+      : [];
+
+    var currentStatus, currentSessions;
+    if (referenceStatus !== 'complete' || postReference.length < N1_CURRENT_COUNT) {
+      currentStatus = 'unavailable';
+      currentSessions = [];
+    } else {
+      currentStatus = 'available';
+      currentSessions = postReference.slice(postReference.length - N1_CURRENT_COUNT);
+    }
+
+    var referenceStats = null;
+    if (referenceStatus === 'complete') {
+      referenceStats = {};
+      N1_METRIC_KEYS.forEach(function (key) {
+        referenceStats[key] = computeIQR(referenceSessions.map(function (s) { return s[key]; }));
+      });
+    }
+
+    var currentValues = null;
+    var comparison = null;
+    if (currentStatus === 'available') {
+      currentValues = {};
+      comparison = {};
+      N1_METRIC_KEYS.forEach(function (key) {
+        var values = currentSessions
+          .map(function (s) { return s[key]; })
+          .filter(function (v) { return typeof v === 'number' && isFinite(v); });
+        var med = median(values);
+        currentValues[key] = med;
+        var stat = referenceStats[key];
+        comparison[key] = (med === null || !stat) ? null : isWithinIQR(med, stat.q1, stat.q3);
+      });
+    }
+
+    return {
+      familiarizationCount: familiarization.length,
+      familiarization: familiarization,
+      referenceStatus: referenceStatus, // 'building' | 'complete'
+      referenceSessions: referenceSessions,
+      referenceCount: referenceSessions.length,
+      referenceMissing: referenceMissing, // 0 si completa
+      referenceStats: referenceStats, // null si building; si no, {metric: {q1, median, q3, iqr, n}}
+      currentStatus: currentStatus, // 'unavailable' | 'available'
+      currentSessions: currentSessions,
+      currentValues: currentValues, // null si unavailable; si no, {metric: medianOfLast3}
+      comparison: comparison // null si unavailable; si no, {metric: true(dentro)|false(fuera)|null}
+    };
+  }
+
   // ================= PERSISTENCIA: VALIDACIÓN DE ESQUEMA (hallazgos #13/#14) =================
 
   function isFiniteNumber(v) {
@@ -561,7 +829,9 @@
     mean: mean,
     sampleStdDev: sampleStdDev,
     median: median,
+    medianAbsoluteDeviation: medianAbsoluteDeviation,
     computeSessionMetrics: computeSessionMetrics,
+    computeHalfSplitDeltas: computeHalfSplitDeltas,
     computeOnsetDelayStats: computeOnsetDelayStats,
     computeBlockMetrics: computeBlockMetrics,
     computeActivityMetrics: computeActivityMetrics,
@@ -569,7 +839,16 @@
     sameStimulus: sameStimulus,
     isValidSessionShape: isValidSessionShape,
     migrateSessionEntry: migrateSessionEntry,
-    partitionSessions: partitionSessions
+    partitionSessions: partitionSessions,
+    N1_FAMILIARIZATION_COUNT: N1_FAMILIARIZATION_COUNT,
+    N1_REFERENCE_MIN: N1_REFERENCE_MIN,
+    N1_REFERENCE_MAX: N1_REFERENCE_MAX,
+    N1_CURRENT_COUNT: N1_CURRENT_COUNT,
+    quantileSorted: quantileSorted,
+    computeIQR: computeIQR,
+    isWithinIQR: isWithinIQR,
+    deriveSessionSummary: deriveSessionSummary,
+    computeNOf1Protocol: computeNOf1Protocol
   };
 
   if (typeof module !== 'undefined' && module.exports) {

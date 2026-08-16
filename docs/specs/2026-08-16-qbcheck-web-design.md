@@ -1,4 +1,4 @@
-# QbCheck web — especificación de diseño (2026-08-16, revisada 2026-08-16 tras audit externo)
+# QbCheck web — especificación de diseño (2026-08-16, revisada 2026-08-16 tras audit externo, ampliada 2026-08-16 con métricas robustas + protocolo N-of-1)
 
 Test de atención tipo CPT (continuous performance task) inspirado en QbCheck, para uso personal en navegador. No es un instrumento diagnóstico; incluye aviso permanente al respecto.
 
@@ -9,6 +9,14 @@ Test de atención tipo CPT (continuous performance task) inspirado en QbCheck, p
 > manejo de valores sin datos suficientes, el esquema de persistencia
 > (schemaVersion 2) y el histórico. El paradigma del test (2000 ms de
 > cadencia, 100 ms de visibilidad, 25% de objetivos, tarea 1-back) no cambia.
+>
+> Ampliación posterior (mismo día): métricas robustas por sesión (mediana y
+> MAD de RT, cambio entre mitades de sesión) y protocolo N-of-1
+> (familiarización / referencia con IQR / estado actual) alrededor de las
+> sesiones ya calculadas. Sigue sin tocarse el paradigma del test, el
+> criterio de 25% de objetivos, la lógica 1-back ni la webcam. El esquema de
+> persistencia **se mantiene en schemaVersion 2**: no se añade ningún campo
+> nuevo persistido (ver sección "Protocolo N-of-1" para la justificación).
 
 ## Alcance
 
@@ -97,6 +105,18 @@ independientemente del retraso de un frame concreto.
 - **Métricas por bloque de 1 minuto** (hallazgo #16, antes solo mencionado en la spec y nunca implementado): la sesión se divide en bloques de 60000 ms de duración teórica (por índice de trial × 2000 ms, no por tiempo real), y para cada bloque se calculan RT mediana (o `null` si el bloque no tuvo aciertos), omisiones, comisiones y objetivos. Se muestran en la pantalla de Resultados como tabla; **los bloques sin aciertos se muestran explícitamente con RT mediana "—", nunca se ocultan de la tabla.**
 - Calidad temporal de presentación de la sesión: `onsetDelayMedianMs`, `onsetDelayMaxMs` (mediana y máximo del retraso `actualOnset - plannedOnset` entre todos los trials).
 
+### Métricas robustas de RT (mediana + MAD) y cambio entre mitades
+
+- **Mediana de RT y MAD (median absolute deviation) sobre los aciertos**, calculadas por `computeSessionMetrics` (campos `rtMedian`, `rtMad`) sobre el mismo array de RT de aciertos que ya alimenta `rtMean`/`rtSd`/`rtCv`:
+  - 0 aciertos → `rtMedian = null` (igual que `rtMean`).
+  - 1 acierto → `rtMedian` definida, `rtMad = null` (con un único punto la mediana existe pero la dispersión no tiene sentido estadístico — mismo criterio que ya se aplicaba a `rtSd` con n=1, hallazgo #7).
+  - 2+ aciertos → ambas definidas. `medianAbsoluteDeviation(values)` es una función pura nueva en `logic.js`: `mediana(|x - mediana(values)|)`.
+  - **En la UI de Resultados, la mediana y la MAD de RT son ahora las métricas de RT DESTACADAS** (celdas con acento de color, igual que antes tenía la media). **RT medio, SD y CV pasan a secundarias**: se siguen mostrando, pero en celdas más pequeñas y sin acento de color (clase CSS `.metric-cell.secondary`) — no se eliminan, solo bajan de énfasis visual.
+- **Cambio entre la 1ª y la 2ª mitad de la sesión** (`computeHalfSplitDeltas` en `logic.js`), por índice de ensayo (no por tiempo real ni por bloques de 1 min, que son un mecanismo distinto ya existente): `mid = floor(n/2)`, 1ª mitad = `trials[0..mid)`, 2ª mitad = `trials[mid..n)`. Con `n` impar, el ensayo del medio cae en la 2ª mitad — mismo criterio que ya usa `median()` para el elemento central en conteos pares/impares de este archivo, elegido por coherencia en vez de introducir un segundo convenio de partición.
+  - `deltaMedianRt` = mediana RT (aciertos) de la 2ª mitad − mediana RT (aciertos) de la 1ª mitad. `null` si alguna mitad tiene 0 aciertos (su mediana ya es `null`).
+  - `deltaOmisiones` (`deltaOmissionPct`) = tasa de omisiones (%) de la 2ª mitad − tasa de omisiones (%) de la 1ª mitad. `null` si alguna mitad no tiene ensayos objetivo (a diferencia de `omissionPct` de `computeSessionMetrics`, que por convención devuelve `0` con 0 objetivos — aquí se exige `null` explícitamente porque la resta entre dos "0 por convención" no es un delta real).
+  - Se muestran en la pantalla de Resultados como dos celdas adicionales del grid de métricas ("Δ mediana RT" y "Δ omisión %"), recalculadas en cada render a partir de `session.trials` (no se persisten como campo nuevo).
+
 ## Actividad motora (webcam)
 
 - MediaPipe Face Landmarker (paquete `@mediapipe/tasks-vision` por CDN, modelo desde el CDN oficial de MediaPipe), en modo VIDEO a ~15 fps durante el test.
@@ -147,12 +167,56 @@ Gráficos dibujados con `<canvas>`, sin librerías.
 - **Validación de esquema al cargar** (hallazgos #13/#14): cada entrada del array se valida (`logic.js#isValidSessionShape`). Las entradas que no cumplen la forma mínima **se aíslan sin descartarlas**: se copian a la clave de respaldo `qbcheck.sessions.corrupt` (con timestamp) y se excluyen de la lista de sesiones válidas devuelta a la UI, que además avisa cuántas entradas se aislaron. Si el JSON completo de `qbcheck.sessions` no parsea (corrupción total), el string original se copia íntegro a `qbcheck.sessions.corrupt` **antes** de que cualquier escritura posterior pueda sobrescribirlo, y se trata como histórico vacío a partir de ahí (con aviso).
 - Exportación: descarga de JSON con todas las sesiones válidas del histórico (todas las duraciones), independientemente del filtro de duración activo en la vista de Histórico.
 
+## Protocolo N-of-1
+
+Protocolo de comparación del propio usuario consigo mismo a lo largo del tiempo, calculado **por separado para cada duración de sesión** (5/10/20 min: cada una tiene su propia secuencia de familiarización/referencia/actual, no se mezclan).
+
+### "Sesión válida" (decisión de diseño)
+
+El encargo pedía usar "el criterio de validez que ya exista en el código" para decidir qué sesiones entran en el protocolo. **Decisión: una sesión válida, a efectos del protocolo, es cualquier sesión que llegó a persistirse en el histórico.** No hace falta un filtro adicional porque el propio flujo de guardado (`finishTest` en `index.html`) ya descarta — sin llegar a construir ni guardar un objeto de sesión — las sesiones abortadas (hallazgo #1: pérdida de foco/suspensión/salto de frame) y las invalidadas por calidad temporal insuficiente (hallazgo #2: `onsetDelayMaxMs > 100ms`). Toda sesión que aparece en `qbcheck.sessions` (tras `partitionSessions`, que ya filtra por forma de esquema) es, por construcción, una sesión completada y temporalmente válida.
+
+### Fases
+
+1. **Familiarización**: las **3 primeras sesiones válidas** de esa duración, por orden cronológico (`dateISO`). Se guardan y se muestran en el histórico normal, pero **atenuadas** (opacidad reducida, clase `.row-familiarization` en la tabla y marcador de punto atenuado en los gráficos de evolución) y **excluidas** del cálculo de referencia y de la comparación de estado actual.
+
+2. **Referencia (línea base)**: las sesiones válidas siguientes a la familiarización, tomando **entre 6 y 10** (todas las disponibles en ese rango; nunca más de 10; con menos de 6 no se considera "completa").
+   - **< 6 sesiones post-familiarización**: referencia "en construcción". Se informa cuántas faltan (`6 − n disponibles`).
+   - **≥ 6 sesiones post-familiarización**: referencia "completa". Se toman las **primeras 10 sesiones post-familiarización disponibles** (o las que haya hasta 10) como ventana de referencia.
+   - **Decisión de diseño (el encargo dejaba margen explícito aquí): la ventana de referencia es FIJA, no móvil.** Una vez hay 10 o más sesiones post-familiarización, la referencia queda fijada para siempre en las sesiones post-familiarización #1–#10 de esa duración; sesiones posteriores nunca la desplazan ni la sustituyen. Esto es intencional: la referencia representa "cómo eras cuando estableciste tu línea base", un punto de comparación estable en el tiempo, no una media móvil de "tus últimas 10 sesiones" (que se re-definiría a sí misma sesión a sesión y dejaría de servir como ancla externa).
+   - Para la referencia completa se calculan, por cada una de las 5 métricas clave, la **mediana, Q1 y Q3** (`computeIQR` en `logic.js`, método de interpolación lineal R-7 / Excel `PERCENTILE.INC`, el más habitual como valor por defecto — para `q=0.5` coincide exactamente con la `median()` ya existente en este archivo).
+   - **Métricas clave del protocolo** (las 5 que se usan tanto para la referencia como para el estado actual):
+     - `omissionPct` — % de omisiones (atención).
+     - `commissionPct` — % de comisiones (impulsividad).
+     - `anticipatoryPct` — % de respuestas anticipatorias. **Nombre real en el código: `anticipatory` es un conteo** (`session.anticipatory`, puede haber más de una anticipatoria por trial); no existía ya una métrica "%" con ese nombre, así que se define aquí como decisión de diseño: `anticipatoryPct = anticipatory / stimuli * 100` (puede superar el 100% en teoría, dado que un mismo trial puede acumular varias anticipatorias; se acepta como definición simple y documentada en vez de acotarla artificialmente).
+     - `rtMedian` — mediana de RT de aciertos (la métrica de RT ahora destacada, ver sección "Métricas por sesión").
+     - `rtMad` — MAD de RT de aciertos.
+
+3. **Estado actual**: la **mediana de las últimas 3 sesiones válidas posteriores a las usadas en la referencia** (sesiones post-referencia; nunca las mismas sesiones que la referencia. Si hay más de 3 sesiones post-referencia disponibles, se usan siempre las 3 MÁS RECIENTES, de forma que el estado actual sí se desliza con el tiempo aunque la referencia no lo haga).
+   - Si aún no hay 3 sesiones post-referencia: "no disponible todavía" (se indica explícitamente, no se inventa un valor parcial con 1 o 2 sesiones).
+   - **Comparación**: para cada una de las 5 métricas clave, se indica si el valor de estado actual cae **dentro o fuera del IQR `[Q1, Q3]`** de la referencia. **Límites inclusivos** (decisión de diseño: un valor exactamente igual a Q1 o Q3 cuenta como "dentro", porque Q1/Q3 son observaciones reales de la propia referencia, no un umbral de exclusión arbitrario). Texto neutro, sin juicio clínico: "dentro de tu rango habitual" / "fuera de tu rango habitual" — nunca alarmista, nunca términos clínicos.
+
+### Derivación dinámica (sin persistencia de estado)
+
+El flag de familiarización y la fase de cada sesión (familiarización / referencia / actual / ninguna todavía) **se derivan en cada lectura**, a partir del orden cronológico de las sesiones válidas de esa duración — funciones puras `deriveSessionSummary` y `computeNOf1Protocol` en `logic.js`, invocadas de nuevo cada vez que se renderiza Resultados o Histórico. **No se guarda ningún campo de protocolo en el objeto de sesión persistido.** Si el usuario borra una sesión del histórico, el protocolo completo (familiarización/referencia/actual, bandas IQR, atenuación visual) se recalcula solo en el siguiente render, sin dejar estado corrupto ni requerir migración.
+
+**`rtMedian`/`rtMad` tampoco se persisten como campos nuevos**: `deriveSessionSummary` los re-deriva de `session.trials` (ya persistido desde schemaVersion 2) en cada llamada, reutilizando `computeSessionMetrics`. Sesiones v1 migradas sin `trials` (`trials === null`) no pueden recuperar `rtMedian`/`rtMad` y quedan como `null` para esas dos métricas — la sesión sigue contando para la partición familiarización/referencia/actual (que solo depende de `dateISO`), simplemente esas dos métricas quedan excluidas de su propio cálculo de IQR o de mediana de estado actual para esa sesión concreta.
+
+### schemaVersion: decisión — se mantiene en 2
+
+El encargo pedía subir `schemaVersion` a 3 (con migración desde v2) **solo si** las métricas robustas nuevas necesitaban persistirse. Tras diseñar la solución, **no fue necesario**: tanto `rtMedian`/`rtMad` (re-derivadas de `trials`) como `deltaMedianRt`/`deltaOmissionPct` (recalculadas en cada render desde `session.trials`) como todo el estado del protocolo N-of-1 (derivado del orden cronológico, no de campos nuevos) se calculan sobre datos que **ya** estaban persistidos desde schemaVersion 2. `logic.js#SESSION_SCHEMA_VERSION` sigue siendo `2`; no se ha tocado `migrateSessionEntry` ni añadido ninguna migración nueva.
+
+### UI
+
+- **Pantalla Inicio**: la opción de duración de 10 min lleva la indicación "recomendada · protocolo" (el protocolo asume sesiones regulares; no restringe funcionalmente 5 ni 20 min).
+- **Pantalla Resultados**: panel "Protocolo N-of-1" nuevo, debajo de la comparación con histórico. Muestra, según el estado: píldora "Familiarización (n/3)" si la sesión actual es de familiarización; "Referencia en construcción (n de 6–10, faltan X)" o "Referencia completa"; y, si hay estado actual disponible, una línea por métrica clave con el valor (mediana de las últimas 3 sesiones), el rango de referencia `[Q1–Q3]` y si cae dentro o fuera.
+- **Pantalla Histórico**: las filas de familiarización se muestran atenuadas (`.row-familiarization`, con etiqueta "familiarización" junto a la fecha) en la tabla de sesiones. Los tres gráficos de evolución (ahora "RT mediana" en vez de "RT medio", Omisión %, Comisión %) dibujan una banda sombreada `[Q1, Q3]` detrás de la línea cuando la referencia está completa, y marcan con un punto atenuado las sesiones de familiarización. Un texto explicativo (`#history-protocol-hint`) resume el estado de la banda/referencia para la duración seleccionada.
+
 ## Pruebas / verificación
 
 - Carga en Chrome sin errores de consola.
 - Sesión de humo corta: secuencia respeta 25% de objetivos, respuestas se clasifican bien (acierto, omisión, comisión, anticipatoria), métricas coherentes, `hits + omissions === targets`.
 - Denegación de cámara: el test funciona sin actividad motora.
-- `node --test test/logic.test.mjs`: cubre generación de secuencia, atribución de respuesta por tiempo (fronteras exactas 199.999/200/1999.999/2000 ms), clasificación final de trial y semántica anticipatoria/omisión, métricas de sesión con valores `null`, mediana, estadísticas de retraso de onset, métricas por bloque de 1 min, submuestreo de traza con corte por hueco temporal, y validación/migración de esquema de sesión.
+- `node --test test/logic.test.mjs`: cubre generación de secuencia, atribución de respuesta por tiempo (fronteras exactas 199.999/200/1999.999/2000 ms), clasificación final de trial y semántica anticipatoria/omisión, métricas de sesión con valores `null`, mediana, estadísticas de retraso de onset, métricas por bloque de 1 min, submuestreo de traza con corte por hueco temporal, validación/migración de esquema de sesión, **mediana/MAD de RT (0/1/2+ aciertos), cambio entre mitades de sesión (caso normal y mitad sin datos), cuantiles/IQR (n=6/7/10), dentro/fuera de rango (incl. bordes), `deriveSessionSummary` (con y sin `trials`) y la partición completa del protocolo N-of-1 con 0/3/5/9/13/20 sesiones válidas por duración**.
 
 ### Solo verificable en navegador real (no cubierto por `node --test`)
 
@@ -162,3 +226,4 @@ Gráficos dibujados con `<canvas>`, sin librerías.
 - Fallos continuos reales de MediaPipe y la desactivación tras 5 errores consecutivos.
 - `QuotaExceededError` real de `localStorage` y su aviso en UI.
 - Doble clic real en "Empezar" y cancelación de cuenta atrás al navegar fuera de Inicio.
+- **UI del protocolo N-of-1**: renderizado real del panel "Protocolo N-of-1" en Resultados (píldoras, texto de comparación) con datos reales acumulados sesión a sesión; atenuación visual real de las filas/puntos de familiarización en el Histórico; banda IQR sombreada detrás de las líneas de los 3 mini-gráficos de evolución (posicionamiento correcto del `fillRect` en coordenadas de canvas con DPI, y que el eje Y se reescale para que la banda quepa); legibilidad del badge "recomendada · protocolo" en la opción de 10 min.

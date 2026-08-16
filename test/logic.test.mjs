@@ -18,7 +18,9 @@ const {
   mean,
   sampleStdDev,
   median,
+  medianAbsoluteDeviation,
   computeSessionMetrics,
+  computeHalfSplitDeltas,
   computeOnsetDelayStats,
   computeBlockMetrics,
   computeActivityMetrics,
@@ -27,7 +29,16 @@ const {
   isValidSessionShape,
   migrateSessionEntry,
   partitionSessions,
-  SESSION_SCHEMA_VERSION
+  SESSION_SCHEMA_VERSION,
+  N1_FAMILIARIZATION_COUNT,
+  N1_REFERENCE_MIN,
+  N1_REFERENCE_MAX,
+  N1_CURRENT_COUNT,
+  quantileSorted,
+  computeIQR,
+  isWithinIQR,
+  deriveSessionSummary,
+  computeNOf1Protocol
 } = require('../logic.js');
 
 const LENGTHS = [150, 300, 600];
@@ -617,5 +628,340 @@ describe('validación de esquema de sesión (hallazgos #13/#14)', () => {
     const result = partitionSessions([]);
     assert.deepStrictEqual(result.valid, []);
     assert.deepStrictEqual(result.invalid, []);
+  });
+});
+
+// ============================================================================
+// MÉTRICAS ROBUSTAS POR SESIÓN + PROTOCOLO N-of-1 (2026-08-16)
+// ============================================================================
+
+describe('medianAbsoluteDeviation', () => {
+  test('array vacío devuelve null', () => {
+    assert.strictEqual(medianAbsoluteDeviation([]), null);
+  });
+
+  test('un solo valor devuelve null (mediana existe pero MAD no tiene sentido)', () => {
+    assert.strictEqual(medianAbsoluteDeviation([5]), null);
+  });
+
+  test('conteo impar de valores', () => {
+    // mediana=3; desviaciones=[2,1,0,1,2] -> ordenadas [0,1,1,2,2] -> mediana=1
+    assert.strictEqual(medianAbsoluteDeviation([1, 2, 3, 4, 5]), 1);
+  });
+
+  test('conteo par de valores', () => {
+    // mediana=2.5; desviaciones=[1.5,0.5,0.5,1.5] -> ordenadas [0.5,0.5,1.5,1.5] -> mediana=1.0
+    assert.strictEqual(medianAbsoluteDeviation([1, 2, 3, 4]), 1);
+  });
+});
+
+describe('computeSessionMetrics — rtMedian/rtMad (métricas robustas de RT)', () => {
+  test('0 aciertos: rtMedian y rtMad son null', () => {
+    const metrics = computeSessionMetrics([
+      { isTarget: true, classification: 'omission', anticipatoryCount: 0 },
+      { isTarget: false, classification: 'correctRejection', anticipatoryCount: 0 }
+    ]);
+    assert.strictEqual(metrics.rtMedian, null);
+    assert.strictEqual(metrics.rtMad, null);
+  });
+
+  test('1 acierto: rtMedian definida, rtMad null', () => {
+    const metrics = computeSessionMetrics([
+      { isTarget: true, classification: 'hit', rt: 450, anticipatoryCount: 0 }
+    ]);
+    assert.strictEqual(metrics.rtMedian, 450);
+    assert.strictEqual(metrics.rtMad, null);
+  });
+
+  test('2 aciertos: rtMedian y rtMad definidas', () => {
+    const metrics = computeSessionMetrics([
+      { isTarget: true, classification: 'hit', rt: 300, anticipatoryCount: 0 },
+      { isTarget: true, classification: 'hit', rt: 700, anticipatoryCount: 0 }
+    ]);
+    assert.strictEqual(metrics.rtMedian, 500);
+    assert.strictEqual(metrics.rtMad, 200);
+  });
+
+  test('3+ aciertos: rtMedian y rtMad correctas (caso normal)', () => {
+    const metrics = computeSessionMetrics([
+      { isTarget: true, classification: 'hit', rt: 300, anticipatoryCount: 0 },
+      { isTarget: true, classification: 'hit', rt: 500, anticipatoryCount: 0 },
+      { isTarget: true, classification: 'hit', rt: 700, anticipatoryCount: 0 }
+    ]);
+    assert.strictEqual(metrics.rtMedian, 500);
+    assert.strictEqual(metrics.rtMad, 200);
+  });
+});
+
+describe('computeHalfSplitDeltas — cambio entre mitades de sesión', () => {
+  test('sesión vacía: todo null', () => {
+    const result = computeHalfSplitDeltas([]);
+    assert.strictEqual(result.deltaMedianRt, null);
+    assert.strictEqual(result.deltaOmissionPct, null);
+    assert.strictEqual(result.firstHalf, null);
+    assert.strictEqual(result.secondHalf, null);
+  });
+
+  test('caso normal: 6 trials, mitad par (mid=3)', () => {
+    const trials = [
+      { isTarget: true, classification: 'hit', rt: 300 },
+      { isTarget: false, classification: 'correctRejection' },
+      { isTarget: true, classification: 'omission' },
+      { isTarget: true, classification: 'hit', rt: 500 },
+      { isTarget: false, classification: 'commission' },
+      { isTarget: true, classification: 'hit', rt: 700 }
+    ];
+    const result = computeHalfSplitDeltas(trials);
+    // 1ª mitad (idx 0-2): targets=2, hits=1 (rt=300), omissions=1 -> omissionPct=50, rtMedian=300
+    // 2ª mitad (idx 3-5): targets=2, hits=2 (rt=500,700), omissions=0 -> omissionPct=0, rtMedian=600
+    assert.strictEqual(result.deltaMedianRt, 300);
+    assert.strictEqual(result.deltaOmissionPct, -50);
+  });
+
+  test('1 trial: la 1ª mitad queda vacía (mid=floor(1/2)=0) -> deltas null', () => {
+    const result = computeHalfSplitDeltas([{ isTarget: true, classification: 'hit', rt: 400 }]);
+    assert.strictEqual(result.deltaMedianRt, null);
+    assert.strictEqual(result.deltaOmissionPct, null);
+  });
+
+  test('mitad sin aciertos (pero con objetivos): deltaMedianRt null, deltaOmissionPct sí calculable', () => {
+    const trials = [
+      { isTarget: true, classification: 'omission' },
+      { isTarget: true, classification: 'omission' },
+      { isTarget: true, classification: 'hit', rt: 300 },
+      { isTarget: true, classification: 'hit', rt: 500 }
+    ];
+    const result = computeHalfSplitDeltas(trials);
+    assert.strictEqual(result.deltaMedianRt, null);
+    assert.strictEqual(result.deltaOmissionPct, -100); // 0 - 100
+  });
+
+  test('mitad sin objetivos: deltaOmissionPct y deltaMedianRt null', () => {
+    const trials = [
+      { isTarget: false, classification: 'correctRejection' },
+      { isTarget: false, classification: 'commission' },
+      { isTarget: true, classification: 'hit', rt: 300 },
+      { isTarget: true, classification: 'hit', rt: 500 }
+    ];
+    const result = computeHalfSplitDeltas(trials);
+    assert.strictEqual(result.deltaMedianRt, null);
+    assert.strictEqual(result.deltaOmissionPct, null);
+  });
+});
+
+describe('quantileSorted / computeIQR', () => {
+  test('quantileSorted coincide con median() para q=0.5 (par e impar)', () => {
+    assert.strictEqual(quantileSorted([10, 20, 30, 40, 50, 60], 0.5), median([10, 20, 30, 40, 50, 60]));
+    assert.strictEqual(quantileSorted([10, 20, 30, 40, 50, 60, 70], 0.5), median([10, 20, 30, 40, 50, 60, 70]));
+  });
+
+  test('computeIQR con 6 valores', () => {
+    const result = computeIQR([10, 20, 30, 40, 50, 60]);
+    assert.strictEqual(result.n, 6);
+    assert.strictEqual(result.q1, 22.5);
+    assert.strictEqual(result.median, 35);
+    assert.strictEqual(result.q3, 47.5);
+    assert.strictEqual(result.iqr, 25);
+  });
+
+  test('computeIQR con 7 valores', () => {
+    const result = computeIQR([10, 20, 30, 40, 50, 60, 70]);
+    assert.strictEqual(result.n, 7);
+    assert.strictEqual(result.q1, 25);
+    assert.strictEqual(result.median, 40);
+    assert.strictEqual(result.q3, 55);
+    assert.strictEqual(result.iqr, 30);
+  });
+
+  test('computeIQR con 10 valores', () => {
+    const result = computeIQR([10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+    assert.strictEqual(result.n, 10);
+    assert.strictEqual(result.q1, 32.5);
+    assert.strictEqual(result.median, 55);
+    assert.strictEqual(result.q3, 77.5);
+    assert.strictEqual(result.iqr, 45);
+  });
+
+  test('computeIQR filtra null/undefined/NaN antes de calcular', () => {
+    const result = computeIQR([5, null, 10, undefined, 15, NaN]);
+    assert.strictEqual(result.n, 3);
+    assert.strictEqual(result.median, 10);
+  });
+
+  test('computeIQR sin valores numéricos devuelve todo null, n=0', () => {
+    const result = computeIQR([null, undefined, NaN]);
+    assert.deepStrictEqual(result, { q1: null, median: null, q3: null, iqr: null, n: 0 });
+  });
+});
+
+describe('isWithinIQR — dentro/fuera del rango de referencia (límites inclusivos)', () => {
+  test('valor dentro del rango', () => {
+    assert.strictEqual(isWithinIQR(30, 20, 40), true);
+  });
+
+  test('valor en el borde (Q1 y Q3 cuentan como dentro, decisión inclusiva)', () => {
+    assert.strictEqual(isWithinIQR(20, 20, 40), true);
+    assert.strictEqual(isWithinIQR(40, 20, 40), true);
+  });
+
+  test('valor fuera del rango', () => {
+    assert.strictEqual(isWithinIQR(19.999, 20, 40), false);
+    assert.strictEqual(isWithinIQR(40.001, 20, 40), false);
+  });
+
+  test('q1/q3 no definidos devuelve null', () => {
+    assert.strictEqual(isWithinIQR(30, null, 40), null);
+    assert.strictEqual(isWithinIQR(30, 20, null), null);
+  });
+});
+
+describe('deriveSessionSummary', () => {
+  function baseSession(overrides) {
+    return Object.assign(
+      {
+        id: 's1',
+        dateISO: '2026-01-01T00:00:00.000Z',
+        durationMin: 10,
+        stimuli: 6,
+        targets: 4,
+        omissions: 1,
+        commissions: 1,
+        anticipatory: 3,
+        trials: [
+          { type: 'no-objetivo', classification: 'correctRejection', rt: null },
+          { type: 'objetivo', classification: 'hit', rt: 300 },
+          { type: 'no-objetivo', classification: 'commission', rt: null },
+          { type: 'objetivo', classification: 'omission', rt: null },
+          { type: 'objetivo', classification: 'hit', rt: 500 },
+          { type: 'objetivo', classification: 'hit', rt: 700 }
+        ]
+      },
+      overrides || {}
+    );
+  }
+
+  test('calcula omissionPct/commissionPct/anticipatoryPct y re-deriva rtMedian/rtMad de session.trials', () => {
+    const summary = deriveSessionSummary(baseSession());
+    assert.strictEqual(summary.omissionPct, 25); // 1/4 * 100
+    assert.strictEqual(summary.commissionPct, 50); // 1/2 * 100
+    assert.strictEqual(summary.anticipatoryPct, 50); // 3/6 * 100
+    assert.strictEqual(summary.rtMedian, 500);
+    assert.strictEqual(summary.rtMad, 200);
+  });
+
+  test('sesión v1 migrada sin trials (null): rtMedian/rtMad quedan null, el resto se calcula igual', () => {
+    const summary = deriveSessionSummary(baseSession({ trials: null }));
+    assert.strictEqual(summary.rtMedian, null);
+    assert.strictEqual(summary.rtMad, null);
+    assert.strictEqual(summary.omissionPct, 25);
+  });
+
+  test('sin objetivos: omissionPct/anticipatoryPct 0 (no división por cero)', () => {
+    const summary = deriveSessionSummary(baseSession({ targets: 0, stimuli: 0, omissions: 0, anticipatory: 0, trials: [] }));
+    assert.strictEqual(summary.omissionPct, 0);
+    assert.strictEqual(summary.commissionPct, 0);
+    assert.strictEqual(summary.anticipatoryPct, 0);
+  });
+});
+
+describe('computeNOf1Protocol — partición familiarización/referencia/actual', () => {
+  // Genera n resúmenes de sesión con fechas crecientes y métricas
+  // deterministas (para poder verificar tanto la partición como las
+  // estadísticas de referencia).
+  function buildSummaries(n) {
+    const arr = [];
+    for (let i = 0; i < n; i++) {
+      arr.push({
+        id: 's' + i,
+        dateISO: new Date(2026, 0, 1 + i).toISOString(),
+        omissionPct: 10 + i,
+        commissionPct: 5 + i,
+        anticipatoryPct: 2 + i,
+        rtMedian: 400 + i * 5,
+        rtMad: 50 + i
+      });
+    }
+    return arr;
+  }
+
+  test('n=0: sin sesiones -> familiarización 0, referencia en construcción (faltan 6), actual no disponible', () => {
+    const p = computeNOf1Protocol(buildSummaries(0));
+    assert.strictEqual(p.familiarizationCount, 0);
+    assert.strictEqual(p.referenceStatus, 'building');
+    assert.strictEqual(p.referenceCount, 0);
+    assert.strictEqual(p.referenceMissing, 6);
+    assert.strictEqual(p.referenceStats, null);
+    assert.strictEqual(p.currentStatus, 'unavailable');
+    assert.strictEqual(p.currentSessions.length, 0);
+    assert.strictEqual(p.currentValues, null);
+    assert.strictEqual(p.comparison, null);
+  });
+
+  test('n=3: exactamente familiarización completa, referencia en construcción (faltan 6)', () => {
+    const p = computeNOf1Protocol(buildSummaries(3));
+    assert.strictEqual(p.familiarizationCount, 3);
+    assert.strictEqual(p.referenceStatus, 'building');
+    assert.strictEqual(p.referenceCount, 0);
+    assert.strictEqual(p.referenceMissing, 6);
+    assert.strictEqual(p.currentStatus, 'unavailable');
+  });
+
+  test('n=5: familiarización 3, 2 sesiones post-familiarización -> referencia en construcción (faltan 4)', () => {
+    const p = computeNOf1Protocol(buildSummaries(5));
+    assert.strictEqual(p.familiarizationCount, 3);
+    assert.strictEqual(p.referenceStatus, 'building');
+    assert.strictEqual(p.referenceCount, 2);
+    assert.strictEqual(p.referenceMissing, 4);
+    assert.strictEqual(p.currentStatus, 'unavailable');
+  });
+
+  test('n=9: familiarización 3, referencia completa con 6 (mínimo), 0 post-referencia -> actual no disponible', () => {
+    const p = computeNOf1Protocol(buildSummaries(9));
+    assert.strictEqual(p.familiarizationCount, 3);
+    assert.strictEqual(p.referenceStatus, 'complete');
+    assert.strictEqual(p.referenceCount, 6);
+    assert.strictEqual(p.referenceMissing, 0);
+    assert.deepStrictEqual(p.referenceSessions.map((s) => s.id), ['s3', 's4', 's5', 's6', 's7', 's8']);
+    assert.strictEqual(p.currentStatus, 'unavailable');
+    assert.strictEqual(p.currentSessions.length, 0);
+
+    // Las estadísticas de referencia deben coincidir con computeIQR sobre
+    // los valores reales de esas 6 sesiones.
+    const expectedOmission = computeIQR([13, 14, 15, 16, 17, 18]);
+    assert.deepStrictEqual(p.referenceStats.omissionPct, expectedOmission);
+  });
+
+  test('n=13: familiarización 3, referencia completa fijada en 10 (tope), 0 post-referencia -> actual no disponible', () => {
+    const p = computeNOf1Protocol(buildSummaries(13));
+    assert.strictEqual(p.familiarizationCount, 3);
+    assert.strictEqual(p.referenceStatus, 'complete');
+    assert.strictEqual(p.referenceCount, 10);
+    assert.deepStrictEqual(p.referenceSessions.map((s) => s.id), ['s3', 's4', 's5', 's6', 's7', 's8', 's9', 's10', 's11', 's12']);
+    assert.strictEqual(p.currentStatus, 'unavailable');
+    assert.strictEqual(p.currentSessions.length, 0);
+  });
+
+  test('n=20: referencia fija en las 10 primeras post-familiarización (no ventana móvil); actual = últimas 3 post-referencia', () => {
+    const p = computeNOf1Protocol(buildSummaries(20));
+    assert.strictEqual(p.familiarizationCount, 3);
+    assert.strictEqual(p.referenceStatus, 'complete');
+    assert.strictEqual(p.referenceCount, 10);
+    // Referencia = post-familiarización [3..12], NO las últimas 10 disponibles.
+    assert.deepStrictEqual(p.referenceSessions.map((s) => s.id), ['s3', 's4', 's5', 's6', 's7', 's8', 's9', 's10', 's11', 's12']);
+    assert.strictEqual(p.currentStatus, 'available');
+    // Post-referencia = [13..19] (7 sesiones); actual = últimas 3 -> [17,18,19].
+    assert.deepStrictEqual(p.currentSessions.map((s) => s.id), ['s17', 's18', 's19']);
+
+    // currentValues.omissionPct = mediana de omissionPct de s17,s18,s19 = mediana(27,28,29) = 28.
+    assert.strictEqual(p.currentValues.omissionPct, 28);
+    // Referencia omissionPct (10 valores 13..22): Q3=19.75 (ver computeIQR test) -> 28 queda FUERA.
+    assert.strictEqual(p.comparison.omissionPct, false);
+  });
+
+  test('sesiones desordenadas por fecha se re-ordenan cronológicamente antes de particionar', () => {
+    const summaries = buildSummaries(9);
+    const shuffled = [summaries[5], summaries[0], summaries[8], summaries[1], summaries[2], summaries[7], summaries[3], summaries[6], summaries[4]];
+    const p = computeNOf1Protocol(shuffled);
+    assert.deepStrictEqual(p.referenceSessions.map((s) => s.id), ['s3', 's4', 's5', 's6', 's7', 's8']);
   });
 });

@@ -160,6 +160,14 @@
     box-shadow: inset 0 0 0 1px var(--series-rt);
   }
   .duration-option.selected .num { color: var(--series-rt); }
+  .duration-option .badge {
+    display: block;
+    margin-top: 4px;
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--series-rt);
+  }
 
   /* ================= EXAMPLES ================= */
   .example-row { display: flex; gap: 16px; flex-wrap: wrap; }
@@ -317,6 +325,39 @@
   .metric-cell .value.accent-rt { color: var(--series-rt); }
   .metric-cell .value.accent-omission { color: var(--series-omission); }
   .metric-cell .value.accent-commission { color: var(--series-commission); }
+  /* Mediana/MAD de RT son las métricas de RT destacadas; media/SD/CV pasan
+     a secundarias (celda más pequeña, menos peso visual) — protocolo N-of-1. */
+  .metric-cell.secondary { padding: 12px 16px; }
+  .metric-cell.secondary .label { font-size: 9px; }
+  .metric-cell.secondary .value { font-size: 15px; font-weight: 500; color: var(--text-secondary); margin-top: 4px; }
+
+  /* ================= PROTOCOLO N-of-1 ================= */
+  .protocol-status-row { display: flex; align-items: center; gap: 10px; padding: 4px 0 12px; }
+  .protocol-pill {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 4px 9px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border-strong);
+    color: var(--text-secondary);
+  }
+  .protocol-pill.building { color: var(--series-commission); border-color: var(--series-commission); }
+  .protocol-pill.complete { color: var(--series-omission); border-color: var(--series-omission); }
+  .compare-line .delta.neutral { color: var(--text-muted); }
+  .protocol-hint { font-size: 11px; color: var(--text-muted); margin-bottom: 10px; line-height: 1.5; }
+
+  /* Sesiones de familiarización: atenuadas, sin entrar en referencia/actual. */
+  .row-familiarization { opacity: 0.5; }
+  .fam-tag {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-left: 6px;
+  }
 
   .compare-line { display: flex; justify-content: space-between; font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--border); font-family: var(--font-mono); }
   .compare-line:last-child { border-bottom: none; }
@@ -423,7 +464,7 @@
           <span class="num">5</span><span class="unit">min · 150 estímulos</span>
         </div>
         <div class="duration-option selected" data-duration="10" role="radio" aria-checked="true" tabindex="0">
-          <span class="num">10</span><span class="unit">min · 300 estímulos</span>
+          <span class="num">10</span><span class="unit">min · 300 estímulos</span><span class="badge">recomendada · protocolo</span>
         </div>
         <div class="duration-option" data-duration="20" role="radio" aria-checked="false" tabindex="0">
           <span class="num">20</span><span class="unit">min · 600 estímulos</span>
@@ -535,6 +576,11 @@
       <div id="results-compare"></div>
     </div>
 
+    <div class="panel row-gap">
+      <div class="panel-title">Protocolo N-of-1</div>
+      <div id="results-protocol"></div>
+    </div>
+
     <div class="notice row-gap">
       <strong>Herramienta orientativa. No es un instrumento diagnóstico.</strong>
       Los resultados no sustituyen una evaluación clínica.
@@ -588,9 +634,10 @@
 
     <div class="panel row-gap">
       <div class="panel-title">Evolución de métricas clave</div>
+      <div class="protocol-hint" id="history-protocol-hint"></div>
       <div class="mini-charts">
         <div>
-          <div class="mini-chart-title" style="color:var(--series-rt)">RT medio (ms)</div>
+          <div class="mini-chart-title" style="color:var(--series-rt)">RT mediana (ms)</div>
           <canvas class="chart" id="chart-hist-rt" height="140"></canvas>
         </div>
         <div>
@@ -647,6 +694,27 @@
   var MAX_DETECTION_ERRORS = 5;
   // Hallazgo #16: tamaño de bloque para la deriva por bloques de 1 min.
   var BLOCK_MS = 60000;
+
+  // ================= PROTOCOLO N-of-1 =================
+  // Etiquetas/unidades de las métricas clave del protocolo, en el orden en
+  // que se muestran. El estado del protocolo (familiarización/referencia/
+  // actual) se recalcula SIEMPRE a partir del histórico leído de
+  // localStorage: nunca se persiste, así que borrar una sesión lo recalcula
+  // solo sin dejar estado corrupto.
+  var PROTOCOL_METRICS = [
+    { key: 'omissionPct', label: 'Omisión %', unit: '%', decimals: 1 },
+    { key: 'commissionPct', label: 'Comisión %', unit: '%', decimals: 1 },
+    { key: 'anticipatoryPct', label: 'Anticipatorias %', unit: '%', decimals: 1 },
+    { key: 'rtMedian', label: 'RT mediana', unit: ' ms', decimals: 0 },
+    { key: 'rtMad', label: 'RT MAD', unit: ' ms', decimals: 0 }
+  ];
+
+  // Deriva el protocolo N-of-1 para un conjunto de sesiones YA filtradas por
+  // duración. Pura respecto al almacenamiento (solo lee, no escribe).
+  function computeProtocolForSessions(sessions) {
+    var summaries = sessions.map(function (s) { return Logic.deriveSessionSummary(s); });
+    return Logic.computeNOf1Protocol(summaries);
+  }
 
   // ---------------- Estado de la app ----------------
   var state = {
@@ -1266,7 +1334,12 @@
 
     var historyBefore = loadSessions().filter(function (s) { return s.durationMin === session.durationMin; });
     var saveResult = saveSession(session);
-    renderResults(session, historyBefore);
+    // Para el protocolo N-of-1 se incluye la sesión recién calculada aunque
+    // el guardado haya fallado (p.ej. QuotaExceededError): la partición
+    // familiarización/referencia/actual se deriva de las sesiones conocidas
+    // en memoria en este momento, no depende de que la escritura triunfe.
+    var historyIncludingCurrent = historyBefore.concat([session]);
+    renderResults(session, historyBefore, historyIncludingCurrent);
     showScreen('resultados');
     if (!saveResult.ok) {
       showToast(
@@ -1399,11 +1472,16 @@
   }
 
   // ================= RESULTADOS =================
-  function renderResults(session, historySameDuration) {
+  function renderResults(session, historySameDuration, historyIncludingCurrentSameDuration) {
     var grid = document.getElementById('results-metric-grid');
     var omissionPct = session.targets === 0 ? 0 : (session.omissions / session.targets) * 100;
     var nonTargets = session.stimuli - session.targets;
     var commissionPct = nonTargets === 0 ? 0 : (session.commissions / nonTargets) * 100;
+
+    // Métricas robustas de RT (mediana/MAD): se re-derivan de session.trials
+    // con las mismas funciones puras de logic.js (sin duplicar cálculo ni
+    // ampliar el esquema de persistencia). null en sesiones v1 sin trials.
+    var robust = Logic.deriveSessionSummary(session);
 
     grid.innerHTML = '';
     // Hallazgo #7: con 0 aciertos rtMean/rtSd/rtCv son null (UI muestra —);
@@ -1411,24 +1489,52 @@
     var rtMeanDisplay = session.rtMean === null || session.rtMean === undefined ? '—' : fmt(session.rtMean, 0) + ' ms';
     var rtSdDisplay = session.rtSd === null || session.rtSd === undefined ? '—' : fmt(session.rtSd, 0) + ' ms';
     var rtCvDisplay = session.rtCv === null || session.rtCv === undefined ? '—' : fmt(session.rtCv, 3);
+    var rtMedianDisplay = robust.rtMedian === null ? '—' : fmt(robust.rtMedian, 0) + ' ms';
+    var rtMadDisplay = robust.rtMad === null ? '—' : fmt(robust.rtMad, 0) + ' ms';
+
+    // Cambio entre 1ª y 2ª mitad de la sesión (por índice de ensayo).
+    var deltaRtDisplay = '—';
+    var deltaOmDisplay = '—';
+    if (Array.isArray(session.trials)) {
+      var halfTrials = session.trials.map(function (t) {
+        return { isTarget: t.type === 'objetivo', classification: t.classification, rt: t.rt };
+      });
+      var deltas = Logic.computeHalfSplitDeltas(halfTrials);
+      if (deltas.deltaMedianRt !== null) {
+        deltaRtDisplay = (deltas.deltaMedianRt > 0 ? '+' : '') + fmt(deltas.deltaMedianRt, 0) + ' ms';
+      }
+      if (deltas.deltaOmissionPct !== null) {
+        deltaOmDisplay = (deltas.deltaOmissionPct > 0 ? '+' : '') + fmt(deltas.deltaOmissionPct, 1) + '%';
+      }
+    }
+
+    // Mediana + MAD de RT son las métricas de RT DESTACADAS (protocolo
+    // N-of-1); media/SD/CV pasan a secundarias (celda 'secondary', más
+    // pequeña, sin acento de color) — no se eliminan, solo bajan de énfasis.
     var cells = [
       { label: 'Estímulos', value: session.stimuli, cls: '' },
       { label: 'Objetivos', value: session.targets, cls: '' },
       { label: 'Omisiones', value: session.omissions, sub: fmt(omissionPct) + '% de objetivos', cls: 'accent-omission' },
       { label: 'Comisiones', value: session.commissions, sub: fmt(commissionPct) + '% de no-objetivos', cls: 'accent-commission' },
       { label: 'Anticipatorias', value: session.anticipatory, cls: '' },
-      { label: 'RT medio', value: rtMeanDisplay, cls: 'accent-rt' },
-      { label: 'RT — SD', value: rtSdDisplay, cls: '' },
-      { label: 'RT — CV', value: rtCvDisplay, cls: '' }
+      { label: 'RT — mediana', value: rtMedianDisplay, cls: 'accent-rt' },
+      { label: 'RT — MAD', value: rtMadDisplay, cls: 'accent-rt' },
+      { label: 'Δ mediana RT (2ª−1ª mitad)', value: deltaRtDisplay, cls: '' },
+      { label: 'Δ omisión % (2ª−1ª mitad)', value: deltaOmDisplay, cls: '' },
+      { label: 'RT medio', value: rtMeanDisplay, cls: '', cellCls: 'secondary' },
+      { label: 'RT — SD', value: rtSdDisplay, cls: '', cellCls: 'secondary' },
+      { label: 'RT — CV', value: rtCvDisplay, cls: '', cellCls: 'secondary' }
     ];
     cells.forEach(function (c) {
       var cell = document.createElement('div');
-      cell.className = 'metric-cell';
+      cell.className = 'metric-cell' + (c.cellCls ? ' ' + c.cellCls : '');
       cell.innerHTML = '<div class="label">' + c.label + '</div>' +
         '<div class="value ' + c.cls + '">' + c.value + '</div>' +
         (c.sub ? '<div class="sub">' + c.sub + '</div>' : '');
       grid.appendChild(cell);
     });
+
+    renderProtocolBlock(document.getElementById('results-protocol'), session, historyIncludingCurrentSameDuration || historySameDuration);
 
     drawLineChart(document.getElementById('chart-rt'), session.rtSeries.map(function (p) { return { x: p.index, y: p.rt }; }), {
       xLabel: 'índice de estímulo', yLabel: 'RT (ms)', color: getCss('--series-rt')
@@ -1519,12 +1625,73 @@
     return sum / filtered.length;
   }
 
+  // Bloque "Protocolo" de la pantalla de Resultados (tarea 2e). `sessions`
+  // son las sesiones VÁLIDAS de la misma duración, incluyendo la sesión
+  // actual. Todo el estado (familiarización/referencia/actual) se deriva
+  // aquí mismo en cada llamada; nada se persiste (tarea 2d).
+  function renderProtocolBlock(host, session, sessions) {
+    if (!host) return;
+    var protocol = computeProtocolForSessions(sessions || []);
+    var isFamiliarization = protocol.familiarization.some(function (s) { return s.id === session.id; });
+
+    var html = '';
+    if (isFamiliarization) {
+      html += '<div class="protocol-status-row">' +
+        '<span class="protocol-pill building">Familiarización (' + protocol.familiarizationCount + '/3)</span>' +
+        '<span style="font-size:12px;color:var(--text-muted);">Esta sesión se guarda en el histórico pero no cuenta para la referencia ni la comparación de estado actual.</span>' +
+        '</div>';
+    }
+
+    if (protocol.referenceStatus === 'building') {
+      html += '<div class="protocol-status-row">' +
+        '<span class="protocol-pill building">Referencia en construcción</span>' +
+        '<span style="font-size:12px;color:var(--text-muted);">' + protocol.referenceCount + ' de 6–10 sesiones post-familiarización (faltan ' + protocol.referenceMissing + ' para completarla).</span>' +
+        '</div>';
+    } else {
+      html += '<div class="protocol-status-row">' +
+        '<span class="protocol-pill complete">Referencia completa</span>' +
+        '<span style="font-size:12px;color:var(--text-muted);">' + protocol.referenceCount + ' sesiones post-familiarización (ventana fija, no se desplaza).</span>' +
+        '</div>';
+
+      if (protocol.currentStatus === 'available') {
+        html += '<div>';
+        PROTOCOL_METRICS.forEach(function (m) {
+          var val = protocol.currentValues[m.key];
+          var stat = protocol.referenceStats[m.key];
+          var within = protocol.comparison[m.key];
+          var valueDisplay = val === null ? '—' : fmt(val, m.decimals) + m.unit;
+          var rangeDisplay = (stat.q1 === null || stat.q3 === null)
+            ? 'sin datos suficientes'
+            : fmt(stat.q1, m.decimals) + '–' + fmt(stat.q3, m.decimals) + m.unit + ' (mediana ' + fmt(stat.median, m.decimals) + m.unit + ')';
+          var statusText = within === null ? '' : (within ? 'dentro de tu rango habitual' : 'fuera de tu rango habitual');
+          var statusCls = within === null ? 'neutral' : (within ? 'down' : 'up');
+          html += '<div class="compare-line"><span class="k">' + m.label + ' — últimas 3 sesiones</span>' +
+            '<span>' + valueDisplay + ' <span class="delta ' + statusCls + '">(referencia ' + rangeDisplay + (statusText ? ', ' + statusText : '') + ')</span></span></div>';
+        });
+        html += '</div>';
+      } else {
+        html += '<div class="notice">Estado actual: todavía no hay 3 sesiones posteriores a la referencia. Se podrá comparar en cuanto las haya.</div>';
+      }
+    }
+
+    host.innerHTML = html;
+  }
+
   // ================= HISTÓRICO =================
   // Hallazgo #15: tabla y TODOS los gráficos filtrados por duración.
   function renderHistory() {
     var sessions = loadSessions()
       .filter(function (s) { return s.durationMin === state.historyDurationMin; })
       .sort(function (a, b) { return new Date(a.dateISO) - new Date(b.dateISO); });
+
+    // Protocolo N-of-1 (tarea 2f): se recalcula en cada render a partir del
+    // orden cronológico de `sessions`, nunca se persiste. Sirve tanto para
+    // atenuar las sesiones de familiarización como para la banda IQR.
+    var protocol = computeProtocolForSessions(sessions);
+    var familIds = {};
+    protocol.familiarization.forEach(function (s) { familIds[s.id] = true; });
+    var summaries = sessions.map(function (s) { return Logic.deriveSessionSummary(s); });
+
     var tbody = document.getElementById('history-tbody');
     var emptyEl = document.getElementById('history-empty');
     tbody.innerHTML = '';
@@ -1538,8 +1705,9 @@
         var nonTargets = s.stimuli - s.targets;
         var commissionPct = nonTargets === 0 ? 0 : (s.commissions / nonTargets) * 100;
         var tr = document.createElement('tr');
+        if (familIds[s.id]) tr.className = 'row-familiarization';
         tr.innerHTML =
-          '<td>' + fmtDate(s.dateISO) + '</td>' +
+          '<td>' + fmtDate(s.dateISO) + (familIds[s.id] ? '<span class="fam-tag">familiarización</span>' : '') + '</td>' +
           '<td>' + s.durationMin + ' min</td>' +
           '<td>' + s.stimuli + '</td>' +
           '<td>' + fmt(omissionPct) + '</td>' +
@@ -1563,6 +1731,20 @@
       });
     }
 
+    // Hint de la banda IQR / familiarización, encima de los mini-gráficos.
+    var hintEl = document.getElementById('history-protocol-hint');
+    if (hintEl) {
+      if (protocol.referenceStatus === 'complete') {
+        hintEl.textContent = 'Zona sombreada = rango de referencia (Q1–Q3) de tus ' + protocol.referenceCount +
+          ' sesiones de línea base (post-familiarización). Las sesiones de familiarización se muestran atenuadas.';
+      } else if (sessions.length > 0) {
+        hintEl.textContent = 'Referencia en construcción (' + protocol.referenceCount + ' de 6–10 sesiones post-familiarización): ' +
+          'la banda de rango habitual aparecerá cuando haya al menos 6. Las sesiones de familiarización se muestran atenuadas.';
+      } else {
+        hintEl.textContent = '';
+      }
+    }
+
     // Hallazgo #7: los gráficos históricos excluyen valores null (RT sin
     // aciertos suficientes) en vez de dibujarlos como 0.
     var chartsEmpty = document.getElementById('hist-charts-empty');
@@ -1575,20 +1757,28 @@
     } else {
       chartsEmpty.style.display = 'none';
       [rtCanvas, omCanvas, comCanvas].forEach(function (c) { c.style.display = 'block'; });
+      var refStats = protocol.referenceStatus === 'complete' ? protocol.referenceStats : null;
+
+      // RT mediana (protocolo N-of-1: la mediana sustituye a la media como
+      // métrica de RT destacada también en la evolución histórica).
       drawLineChart(rtCanvas, sessions
-        .map(function (s, i) { return { x: i, y: s.rtMean }; })
+        .map(function (s, i) { return { x: i, y: summaries[i].rtMedian, dim: !!familIds[s.id] }; })
         .filter(function (p) { return p.y !== null && p.y !== undefined; }), {
-        xLabel: 'sesión', yLabel: 'ms', color: getCss('--series-rt')
+        xLabel: 'sesión', yLabel: 'ms', color: getCss('--series-rt'), showPoints: true,
+        band: refStats ? refStats.rtMedian : null
       });
       drawLineChart(omCanvas, sessions.map(function (s, i) {
-        var pct = s.targets === 0 ? 0 : (s.omissions / s.targets) * 100;
-        return { x: i, y: pct };
-      }), { xLabel: 'sesión', yLabel: '%', color: getCss('--series-omission') });
+        return { x: i, y: summaries[i].omissionPct, dim: !!familIds[s.id] };
+      }), {
+        xLabel: 'sesión', yLabel: '%', color: getCss('--series-omission'), showPoints: true,
+        band: refStats ? refStats.omissionPct : null
+      });
       drawLineChart(comCanvas, sessions.map(function (s, i) {
-        var nt = s.stimuli - s.targets;
-        var pct = nt === 0 ? 0 : (s.commissions / nt) * 100;
-        return { x: i, y: pct };
-      }), { xLabel: 'sesión', yLabel: '%', color: getCss('--series-commission') });
+        return { x: i, y: summaries[i].commissionPct, dim: !!familIds[s.id] };
+      }), {
+        xLabel: 'sesión', yLabel: '%', color: getCss('--series-commission'), showPoints: true,
+        band: refStats ? refStats.commissionPct : null
+      });
     }
   }
 
@@ -1658,12 +1848,26 @@
     var ys = points.map(function (p) { return p.y; });
     var xMin = Math.min.apply(null, xs), xMax = Math.max.apply(null, xs);
     var yMin = 0, yMax = Math.max.apply(null, ys);
+    // La banda IQR de referencia (protocolo N-of-1) debe caber en el
+    // gráfico aunque quede por encima de los puntos dibujados.
+    var band = opts.band && typeof opts.band.q1 === 'number' && typeof opts.band.q3 === 'number' ? opts.band : null;
+    if (band && band.q3 > yMax) yMax = band.q3;
     if (xMax === xMin) xMax = xMin + 1;
     if (yMax === yMin) yMax = yMin + 1;
     yMax *= 1.12;
 
     function px(x) { return padL + ((x - xMin) / (xMax - xMin)) * plotW; }
     function py(y) { return padT + plotH - ((y - yMin) / (yMax - yMin)) * plotH; }
+
+    // Banda IQR de referencia (Q1-Q3), sombreada, detrás de gridlines/línea.
+    if (band) {
+      ctx.save();
+      ctx.globalAlpha = 0.16;
+      ctx.fillStyle = opts.color;
+      var bandTop = py(band.q3), bandBottom = py(band.q1);
+      ctx.fillRect(padL, bandTop, plotW, Math.max(1, bandBottom - bandTop));
+      ctx.restore();
+    }
 
     // Gridlines recesivas (horizontales, 4 divisiones)
     ctx.strokeStyle = border;
@@ -1709,6 +1913,20 @@
       if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.stroke();
+
+    // Marcadores por punto (opcional): usados en el histórico para atenuar
+    // visualmente las sesiones de familiarización (protocolo N-of-1),
+    // igual que en la tabla de sesiones.
+    if (opts.showPoints) {
+      points.forEach(function (p) {
+        ctx.beginPath();
+        ctx.globalAlpha = p.dim ? 0.4 : 1;
+        ctx.fillStyle = opts.color;
+        ctx.arc(px(p.x), py(p.y), 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.globalAlpha = 1;
+    }
 
     // Etiqueta directa del último valor
     var last = points[points.length - 1];
